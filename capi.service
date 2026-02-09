@@ -1,0 +1,35 @@
+[Unit]
+Description=CEC HTTP Bridge Service
+Documentation=https://github.com/LukasParke/capi
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/opt/capi
+
+# Main service command
+ExecStart=/opt/capi/capi -bind :8080 -name "CEC HTTP Bridge"
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/dev
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=capi
+
+# Resource limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
