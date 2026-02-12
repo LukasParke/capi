@@ -53,7 +53,7 @@ jobs:
             ${{ matrix.image }} bash -c '
               set -e
               apt-get update && apt-get install -y --no-install-recommends \
-                gcc libc6-dev curl pkg-config libcec-dev ca-certificates
+                gcc libc6-dev curl pkg-config libcec-dev libp8-platform-dev libudev-dev ca-certificates
               curl -sL https://go.dev/dl/${{ matrix.go_tarball }} | tar -C /usr/local -xz
               export PATH=$PATH:/usr/local/go/bin
               export GOARM="${{ matrix.goarm }}"
