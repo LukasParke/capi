@@ -17,15 +17,19 @@ echo "Fetching latest release info..."
 RELEASE_JSON=$(curl -sSL --connect-timeout 10 --max-time 30 \
   "https://api.github.com/repos/$REPO/releases/latest")
 
-LATEST=$(echo "$RELEASE_JSON" | grep "browser_download_url.*$BINARY" | head -1 | cut -d '"' -f 4)
+# Helper: extract asset download URL by name from the release JSON.
+asset_url() {
+  echo "$RELEASE_JSON" | grep "browser_download_url.*/$1\"" | head -1 | cut -d '"' -f 4
+}
 
-if [ -z "$LATEST" ]; then
+BINARY_URL=$(asset_url "$BINARY")
+if [ -z "$BINARY_URL" ]; then
   echo "ERROR: Could not find download URL for $BINARY in latest release."
   echo "Check https://github.com/$REPO/releases"
   exit 1
 fi
 
-echo "Download URL: $LATEST"
+echo "Binary URL: $BINARY_URL"
 
 # ── Install runtime dependencies ──────────────────────────────────────
 echo "Installing runtime dependencies..."
@@ -34,15 +38,14 @@ apt-get update && apt-get install -y libcec6 cec-utils
 # ── Download binary ───────────────────────────────────────────────────
 mkdir -p /opt/capi
 echo "Downloading $BINARY..."
-curl -sSL --connect-timeout 10 --max-time 120 "$LATEST" -o /opt/capi/capi
+curl -sSL --connect-timeout 10 --max-time 120 "$BINARY_URL" -o /opt/capi/capi
 chmod +x /opt/capi/capi
 
-# ── Download support files from repo ──────────────────────────────────
-BASE="https://raw.githubusercontent.com/$REPO/main"
+# ── Download support files from release ───────────────────────────────
 echo "Downloading support files..."
-curl -sSL --connect-timeout 10 --max-time 30 "$BASE/capi.service" -o /etc/systemd/system/capi.service
-curl -sSL --connect-timeout 10 --max-time 30 "$BASE/99-cec.rules" -o /etc/udev/rules.d/99-cec.rules
-curl -sSL --connect-timeout 10 --max-time 30 "$BASE/capi/index.html" -o /opt/capi/index.html
+curl -sSL --connect-timeout 10 --max-time 30 "$(asset_url capi.service)" -o /etc/systemd/system/capi.service
+curl -sSL --connect-timeout 10 --max-time 30 "$(asset_url 99-cec.rules)" -o /etc/udev/rules.d/99-cec.rules
+curl -sSL --connect-timeout 10 --max-time 30 "$(asset_url index.html)"   -o /opt/capi/index.html
 
 # ── Create service user ───────────────────────────────────────────────
 id -u capi &>/dev/null || useradd --system --user-group --no-create-home --shell /usr/sbin/nologin capi

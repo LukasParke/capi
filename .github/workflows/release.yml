@@ -9,8 +9,22 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: arm64
+            platform: linux/arm64
+            image: arm64v8/debian:bookworm
+            go_tarball: go1.25.2.linux-arm64.tar.gz
+            binary: capi-linux-arm64
+          - arch: armv6
+            platform: linux/arm/v6
+            image: arm32v6/debian:bookworm
+            go_tarball: go1.25.2.linux-armv6l.tar.gz
+            binary: capi-linux-armv6
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -23,45 +37,52 @@ jobs:
       - name: Generate version string
         id: version
         run: |
-          VERSION="v$(date -u +%Y%m%d.%H%M%S)-$(git rev-parse --short HEAD)"
+          VERSION="v$(git log -1 --format=%cd --date=format:%Y%m%d.%H%M%S)-$(git rev-parse --short HEAD)"
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building version: $VERSION"
 
-      - name: Build arm64 binary
+      - name: Build ${{ matrix.arch }} binary
         run: |
           docker run --rm \
-            --platform linux/arm64 \
+            --platform ${{ matrix.platform }} \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
             -e VERSION="${{ steps.version.outputs.VERSION }}" \
-            arm64v8/debian:bookworm bash -c '
+            ${{ matrix.image }} bash -c '
               set -e
               apt-get update && apt-get install -y --no-install-recommends \
                 gcc libc6-dev curl pkg-config libcec-dev ca-certificates
-              curl -sL https://go.dev/dl/go1.25.2.linux-arm64.tar.gz | tar -C /usr/local -xz
+              curl -sL https://go.dev/dl/${{ matrix.go_tarball }} | tar -C /usr/local -xz
               export PATH=$PATH:/usr/local/go/bin
               export CGO_ENABLED=1
               export CGO_LDFLAGS="-Wl,--no-as-needed -lstdc++ -Wl,--as-needed"
-              go build -ldflags "-X main.version=${VERSION} -s -w" -o capi-linux-arm64 ./capi
+              go build -ldflags "-X main.version=${VERSION} -s -w" -o ${{ matrix.binary }} ./capi
             '
 
-      - name: Build armv6 binary
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary }}
+          path: ${{ matrix.binary }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Generate version string
+        id: version
         run: |
-          docker run --rm \
-            --platform linux/arm/v6 \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            -e VERSION="${{ steps.version.outputs.VERSION }}" \
-            arm32v6/debian:bookworm bash -c '
-              set -e
-              apt-get update && apt-get install -y --no-install-recommends \
-                gcc libc6-dev curl pkg-config libcec-dev ca-certificates
-              curl -sL https://go.dev/dl/go1.25.2.linux-armv6l.tar.gz | tar -C /usr/local -xz
-              export PATH=$PATH:/usr/local/go/bin
-              export CGO_ENABLED=1
-              export CGO_LDFLAGS="-Wl,--no-as-needed -lstdc++ -Wl,--as-needed"
-              go build -ldflags "-X main.version=${VERSION} -s -w" -o capi-linux-armv6 ./capi
-            '
+          VERSION="v$(git log -1 --format=%cd --date=format:%Y%m%d.%H%M%S)-$(git rev-parse --short HEAD)"
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Releasing version: $VERSION"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
