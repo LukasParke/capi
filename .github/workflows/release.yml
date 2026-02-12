@@ -17,14 +17,16 @@ jobs:
         include:
           - arch: arm64
             platform: linux/arm64
-            image: arm64v8/debian:bookworm
+            image: debian:bookworm
             go_tarball: go1.25.2.linux-arm64.tar.gz
             binary: capi-linux-arm64
+            goarm: ""
           - arch: armv6
-            platform: linux/arm/v6
-            image: arm32v6/debian:bookworm
+            platform: linux/arm/v7
+            image: debian:bookworm
             go_tarball: go1.25.2.linux-armv6l.tar.gz
             binary: capi-linux-armv6
+            goarm: "6"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -54,6 +56,7 @@ jobs:
                 gcc libc6-dev curl pkg-config libcec-dev ca-certificates
               curl -sL https://go.dev/dl/${{ matrix.go_tarball }} | tar -C /usr/local -xz
               export PATH=$PATH:/usr/local/go/bin
+              export GOARM="${{ matrix.goarm }}"
               export CGO_ENABLED=1
               export CGO_LDFLAGS="-Wl,--no-as-needed -lstdc++ -Wl,--as-needed"
               go build -ldflags "-X main.version=${VERSION} -s -w" -o ${{ matrix.binary }} ./capi
