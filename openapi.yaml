@@ -1,0 +1,597 @@
+openapi: 3.0.3
+info:
+  title: CEC HTTP Bridge API
+  description: |
+    REST API for controlling HDMI-CEC devices. Use this API to power on/off
+    TVs and devices, control volume, switch inputs (HDMI ports), send remote
+    key presses, and send raw CEC commands. Intended for home automation,
+    media centers, and scripting.
+  version: 1.0.0
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080/api
+    description: Local (default)
+  - url: http://{host}:8080/api
+    description: Network
+    variables:
+      host:
+        default: localhost
+
+tags:
+  - name: Devices
+    description: CEC device discovery and info
+  - name: Power
+    description: Power on/off and status
+  - name: Volume
+    description: Volume and mute
+  - name: Source
+    description: Active source and HDMI input
+  - name: Navigation
+    description: Send key presses (remote control)
+  - name: Raw
+    description: Raw CEC commands
+  - name: System
+    description: Logs and health
+
+paths:
+  /devices:
+    get:
+      tags: [Devices]
+      summary: List CEC devices
+      description: |
+        List active CEC devices on the bus. By default uses cached device info.
+        Use query `rescan=1` or `rescan=true` to force a full bus rescan.
+      operationId: getDevices
+      parameters:
+        - name: rescan
+          in: query
+          description: Force a full bus rescan before returning (1 or true)
+          required: false
+          schema:
+            type: string
+            enum: ['1', 'true', 'false']
+      responses:
+        '200':
+          description: Devices retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                status: success
+                message: Devices retrieved
+                data:
+                  - logical_address: 0
+                    address_name: TV
+                    physical_address: 0.0.0.0
+                    vendor_id: "0x0000F0"
+                    vendor_name: Samsung
+                    cec_version: "1.4"
+                    power_status: On
+                    osd_name: TV
+                    menu_language: eng
+                    is_active: true
+                    is_active_source: false
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /devices/{address}:
+    get:
+      tags: [Devices]
+      summary: Get device by logical address
+      description: Get detailed information about a specific CEC device.
+      operationId: getDevice
+      parameters:
+        - $ref: '#/components/parameters/LogicalAddress'
+      responses:
+        '200':
+          description: Device info retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /power/on:
+    post:
+      tags: [Power]
+      summary: Power on TV
+      description: Power on the TV (logical address 0).
+      operationId: powerOn
+      responses:
+        '200':
+          description: Power on command sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /power/on/{address}:
+    post:
+      tags: [Power]
+      summary: Power on device
+      description: Power on a specific device by logical address.
+      operationId: powerOnAddress
+      parameters:
+        - $ref: '#/components/parameters/LogicalAddress'
+      responses:
+        '200':
+          description: Power on command sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /power/off:
+    post:
+      tags: [Power]
+      summary: Power off TV
+      description: Put the TV (logical address 0) in standby.
+      operationId: powerOff
+      responses:
+        '200':
+          description: Standby command sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /power/off/{address}:
+    post:
+      tags: [Power]
+      summary: Power off device
+      description: Put a specific device in standby.
+      operationId: powerOffAddress
+      parameters:
+        - $ref: '#/components/parameters/LogicalAddress'
+      responses:
+        '200':
+          description: Standby command sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /power/status:
+    get:
+      tags: [Power]
+      summary: Get TV power status
+      description: Get power status of the TV (logical address 0).
+      operationId: getPowerStatus
+      responses:
+        '200':
+          description: Power status retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                status: success
+                message: Power status retrieved
+                data:
+                  address: 0
+                  status: On
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /power/status/{address}:
+    get:
+      tags: [Power]
+      summary: Get device power status
+      description: Get power status of a specific device.
+      operationId: getPowerStatusAddress
+      parameters:
+        - $ref: '#/components/parameters/LogicalAddress'
+      responses:
+        '200':
+          description: Power status retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /volume/up:
+    post:
+      tags: [Volume]
+      summary: Volume up
+      description: Increase system volume by one step.
+      operationId: volumeUp
+      responses:
+        '200':
+          description: Volume up command sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /volume/down:
+    post:
+      tags: [Volume]
+      summary: Volume down
+      description: Decrease system volume by one step.
+      operationId: volumeDown
+      responses:
+        '200':
+          description: Volume down command sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /volume/mute:
+    post:
+      tags: [Volume]
+      summary: Toggle mute
+      description: Toggle audio mute.
+      operationId: volumeMute
+      responses:
+        '200':
+          description: Mute toggle command sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /source/active:
+    get:
+      tags: [Source]
+      summary: Get active source
+      description: Get the currently active source (device that is displaying).
+      operationId: getActiveSource
+      responses:
+        '200':
+          description: Active source retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                status: success
+                message: Active source retrieved
+                data:
+                  address: 4
+                  name: Playback Device 1
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /source/{address}:
+    post:
+      tags: [Source]
+      summary: Switch to device
+      description: |
+        Switch to a specific device by logical address. Powers on the device
+        if in standby and sends Set Stream Path.
+      operationId: setActiveSource
+      parameters:
+        - $ref: '#/components/parameters/LogicalAddress'
+      responses:
+        '200':
+          description: Switched to device
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /hdmi/{port}:
+    post:
+      tags: [Source]
+      summary: Switch to HDMI port
+      description: Switch TV input to a specific HDMI port (1-4).
+      operationId: setHDMIPort
+      parameters:
+        - name: port
+          in: path
+          required: true
+          description: HDMI port number (1-4)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 4
+      responses:
+        '200':
+          description: Switched to HDMI port
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /key:
+    post:
+      tags: [Navigation]
+      summary: Send key press
+      description: |
+        Send a key press (press and release) to a device. Provide either
+        `key` (name) or `keycode` (0-255). For keycode 0 (Select), use
+        `"key": "select"`.
+      operationId: sendKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KeyRequest'
+            examples:
+              byKey:
+                summary: By key name
+                value:
+                  address: 4
+                  key: up
+              byKeycode:
+                summary: By keycode
+                value:
+                  address: 4
+                  keycode: 0
+      responses:
+        '200':
+          description: Key command sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /command:
+    post:
+      tags: [Raw]
+      summary: Send raw CEC command
+      description: |
+        Send a raw CEC command. Initiator and destination are logical
+        addresses (0-15). Opcode is 0-255. Parameters are optional; max 14 bytes.
+      operationId: sendCommand
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+            example:
+              initiator: 1
+              destination: 0
+              opcode: 143
+              parameters: []
+      responses:
+        '200':
+          description: Raw command sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /logs:
+    get:
+      tags: [System]
+      summary: Get recent logs
+      description: Get recent CEC log messages (traffic, notices, errors).
+      operationId: getLogs
+      responses:
+        '200':
+          description: Logs retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                status: success
+                message: Logs retrieved
+                data:
+                  - level: NOTICE
+                    timestamp: "2024-02-08T10:30:45Z"
+                    message: CEC connection opened
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /health:
+    get:
+      tags: [System]
+      summary: Health check
+      description: Service health and libcec version information.
+      operationId: getHealth
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                status: success
+                message: Service is healthy
+                data:
+                  version: "1.0.0"
+                  libcec: "libCEC version 6.0.2"
+
+components:
+  parameters:
+    LogicalAddress:
+      name: address
+      in: path
+      required: true
+      description: CEC logical address (0-15). 0=TV, 1=Rec 1, 2=Rec 2, 3=Tuner 1, 4=Playback 1, 5=Audio, etc.
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 15
+
+  schemas:
+    ApiResponse:
+      type: object
+      required: [status, message]
+      properties:
+        status:
+          type: string
+          enum: [success, error]
+        message:
+          type: string
+          description: Human-readable message
+        data:
+          description: Response payload (varies by endpoint)
+          nullable: true
+
+    Device:
+      type: object
+      properties:
+        logical_address:
+          type: integer
+          minimum: 0
+          maximum: 15
+        address_name:
+          type: string
+          example: TV
+        physical_address:
+          type: string
+          example: "0.0.0.0"
+        vendor_id:
+          type: string
+          example: "0x0000F0"
+        vendor_name:
+          type: string
+        cec_version:
+          type: string
+        power_status:
+          type: string
+          enum: [On, Standby, "Transitioning to On", "Transitioning to Standby", Unknown]
+        osd_name:
+          type: string
+        menu_language:
+          type: string
+        is_active:
+          type: boolean
+        is_active_source:
+          type: boolean
+
+    KeyRequest:
+      type: object
+      required: [address]
+      properties:
+        address:
+          type: integer
+          minimum: 0
+          maximum: 15
+          description: Target device logical address
+        key:
+          type: string
+          description: Key name (use when keycode is not provided)
+          enum:
+            - up
+            - down
+            - left
+            - right
+            - select
+            - enter
+            - back
+            - home
+            - menu
+            - play
+            - pause
+            - stop
+        keycode:
+          type: integer
+          minimum: 0
+          maximum: 255
+          description: Raw CEC keycode (use for keycode 0 = Select or other codes)
+      oneOf:
+        - required: [key]
+        - required: [keycode]
+
+    CommandRequest:
+      type: object
+      required: [initiator, destination, opcode]
+      properties:
+        initiator:
+          type: integer
+          minimum: 0
+          maximum: 15
+          description: Source logical address
+        destination:
+          type: integer
+          minimum: 0
+          maximum: 15
+          description: Target logical address
+        opcode:
+          type: integer
+          minimum: 0
+          maximum: 255
+          description: CEC opcode
+        parameters:
+          type: array
+          maxItems: 14
+          items:
+            type: integer
+            minimum: 0
+            maximum: 255
+          default: []
+
+    LogMessage:
+      type: object
+      properties:
+        level:
+          type: string
+          enum: [ERROR, WARNING, NOTICE, TRAFFIC, DEBUG]
+        timestamp:
+          type: string
+          format: date-time
+        message:
+          type: string
+
+  responses:
+    BadRequest:
+      description: Invalid parameters or request body
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponse'
+          example:
+            status: error
+            message: Invalid logical address
+    InternalError:
+      description: CEC operation failed or server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiResponse'
+          example:
+            status: error
+            message: failed to open adapter

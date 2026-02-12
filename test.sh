@@ -28,9 +28,9 @@ test_endpoint() {
     echo -n "Testing $name... "
     
     if [ -z "$data" ]; then
-        response=$(curl -s -w "\n%{http_code}" -X $method "$API_URL$endpoint" 2>/dev/null)
+        response=$(curl -s --connect-timeout 5 --max-time 15 -w "\n%{http_code}" -X $method "$API_URL$endpoint" 2>/dev/null)
     else
-        response=$(curl -s -w "\n%{http_code}" -X $method "$API_URL$endpoint" \
+        response=$(curl -s --connect-timeout 5 --max-time 15 -w "\n%{http_code}" -X $method "$API_URL$endpoint" \
             -H "Content-Type: application/json" \
             -d "$data" 2>/dev/null)
     fi

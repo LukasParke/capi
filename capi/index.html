@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CEC Control</title>
+  <style>
+    :root {
+      --bg: #1a1a2e;
+      --surface: #16213e;
+      --card: #0f3460;
+      --accent: #e94560;
+      --accent2: #533483;
+      --text: #eee;
+      --muted: #999;
+      --ok: #2ecc71;
+      --warn: #f39c12;
+      --radius: 8px;
+      --gap: 12px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: var(--gap);
+      max-width: 860px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      font-size: 1.4rem;
+      margin-bottom: var(--gap);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    h2 {
+      font-size: 1rem;
+      margin-bottom: 8px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .badge {
+      font-size: .75rem;
+      padding: 2px 8px;
+      border-radius: 10px;
+      background: var(--ok);
+      color: #000;
+      display: inline-block;
+    }
+
+    .badge.err {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .badge.warn {
+      background: var(--warn);
+      color: #000;
+    }
+
+    .badge.off {
+      background: #555;
+      color: #ccc;
+    }
+
+    .grid {
+      display: grid;
+      gap: var(--gap);
+    }
+
+    @media (min-width: 600px) {
+      .grid {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    .card {
+      background: var(--surface);
+      border-radius: var(--radius);
+      padding: 16px;
+      border: 1px solid rgba(255, 255, 255, .06);
+    }
+
+    .card.full {
+      grid-column: 1 / -1;
+    }
+
+    button {
+      background: var(--card);
+      color: var(--text);
+      border: 1px solid rgba(255, 255, 255, .1);
+      border-radius: var(--radius);
+      padding: 8px 14px;
+      cursor: pointer;
+      font-size: .85rem;
+      transition: background .15s, transform .1s;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+    }
+
+    button:hover {
+      background: var(--accent2);
+    }
+
+    button:active {
+      transform: scale(.96);
+    }
+
+    button.accent {
+      background: var(--accent);
+    }
+
+    button.accent:hover {
+      background: #c13050;
+    }
+
+    button.sm {
+      padding: 4px 10px;
+      font-size: .8rem;
+    }
+
+    button:disabled {
+      opacity: .4;
+      cursor: default;
+    }
+
+    .btn-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+
+    select,
+    input[type=number] {
+      background: var(--card);
+      color: var(--text);
+      border: 1px solid rgba(255, 255, 255, .1);
+      border-radius: var(--radius);
+      padding: 6px 10px;
+      font-size: .85rem;
+    }
+
+    label {
+      font-size: .85rem;
+      color: var(--muted);
+    }
+
+    .device-grid {
+      display: grid;
+      gap: 8px;
+    }
+
+    @media (min-width: 500px) {
+      .device-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    .dev-card {
+      background: rgba(0, 0, 0, .2);
+      border-radius: var(--radius);
+      padding: 12px;
+      font-size: .85rem;
+      border-left: 3px solid var(--card);
+    }
+
+    .dev-card.active-src {
+      border-left-color: var(--ok);
+    }
+
+    .dev-card .dev-name {
+      font-weight: bold;
+      color: var(--accent);
+      font-size: .95rem;
+    }
+
+    .dev-card .dev-meta {
+      color: var(--muted);
+      margin: 4px 0;
+    }
+
+    .dev-card .dev-actions {
+      margin-top: 6px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+
+    .dev-card .dev-actions-divider {
+      width: 100%;
+      border: none;
+      border-top: 1px solid rgba(255, 255, 255, .08);
+      margin: 4px 0 2px 0;
+    }
+
+    .dev-card .dev-actions-label {
+      width: 100%;
+      font-size: .75rem;
+      color: var(--muted);
+      margin-bottom: 2px;
+    }
+
+    .dpad {
+      display: grid;
+      grid-template-columns: repeat(3, 56px);
+      grid-template-rows: repeat(3, 56px);
+      gap: 4px;
+      justify-content: center;
+      margin: 8px auto;
+    }
+
+    .dpad button {
+      width: 56px;
+      height: 56px;
+      font-size: 1.2rem;
+      padding: 0;
+    }
+
+    .dpad .center {
+      background: var(--accent);
+      border-radius: 50%;
+    }
+
+    .dpad .empty {
+      visibility: hidden;
+    }
+
+    .media-row {
+      display: flex;
+      gap: 6px;
+      justify-content: center;
+      margin-top: 8px;
+    }
+
+    .media-row button {
+      min-width: 52px;
+    }
+
+    .result {
+      margin-top: 8px;
+      padding: 8px;
+      background: rgba(0, 0, 0, .25);
+      border-radius: var(--radius);
+      font-size: .85rem;
+      max-height: 180px;
+      overflow-y: auto;
+      word-break: break-word;
+      white-space: pre-wrap;
+    }
+
+    .result:empty {
+      display: none;
+    }
+
+    .log-box {
+      max-height: 300px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: .8rem;
+      background: rgba(0, 0, 0, .3);
+      border-radius: var(--radius);
+      padding: 8px;
+    }
+
+    .log-line {
+      padding: 2px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, .04);
+    }
+
+    .log-line .lvl {
+      font-weight: bold;
+      margin-right: 6px;
+    }
+
+    .lvl-ERROR {
+      color: var(--accent);
+    }
+
+    .lvl-WARNING {
+      color: var(--warn);
+    }
+
+    .lvl-NOTICE {
+      color: var(--ok);
+    }
+
+    .lvl-TRAFFIC {
+      color: #3498db;
+    }
+
+    .lvl-DEBUG {
+      color: var(--muted);
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--surface);
+      border: 1px solid rgba(255, 255, 255, .15);
+      border-radius: var(--radius);
+      padding: 8px 18px;
+      font-size: .85rem;
+      opacity: 0;
+      transition: opacity .3s;
+      pointer-events: none;
+      z-index: 100;
+    }
+
+    .toast.show {
+      opacity: 1;
+    }
+
+    .toast.ok {
+      border-color: var(--ok);
+    }
+
+    .toast.fail {
+      border-color: var(--accent);
+    }
+  </style>
+</head>
+
+<body>
+
+  <h1>CEC Control <span id="health-badge" class="badge">...</span><span id="live-badge" class="badge off"
+      style="margin-left:6px;display:none">Live</span><span id="update-badge" class="badge warn"
+      style="margin-left:6px;display:none;cursor:pointer" onclick="doUpdate()"></span></h1>
+
+  <div class="grid">
+
+    <!-- Devices -->
+    <div class="card full">
+      <h2>Devices on CEC Bus</h2>
+      <div class="btn-row" style="margin-bottom:10px">
+        <button onclick="refreshDevices(false)">Refresh</button>
+        <button onclick="refreshDevices(true)">Rescan Bus</button>
+        <span id="dev-status" style="font-size:.8rem;color:var(--muted)"></span>
+      </div>
+      <div id="devices-result" class="device-grid">
+        <span style="color:var(--muted)">Loading devices...</span>
+      </div>
+    </div>
+
+    <!-- Source / HDMI -->
+    <div class="card">
+      <h2>Source / Input</h2>
+      <div style="margin-bottom:10px">
+        <label>Set active source:</label>
+        <div class="btn-row" style="margin-top:4px">
+          <select id="source-addr"></select>
+          <button onclick="apiPost('/api/source/'+qs('#source-addr').value,null,'#source-result')">Activate</button>
+        </div>
+      </div>
+      <div>
+        <label>Switch display to HDMI port:</label>
+        <div id="hdmi-buttons" class="btn-row" style="margin-top:4px">
+          <button onclick="apiPost('/api/hdmi/1',null,'#source-result')">HDMI 1</button>
+          <button onclick="apiPost('/api/hdmi/2',null,'#source-result')">HDMI 2</button>
+        </div>
+      </div>
+      <div id="source-result" class="result"></div>
+    </div>
+
+    <!-- Volume -->
+    <div class="card">
+      <h2>Volume <span id="audio-status"
+          style="font-size:.75rem;color:var(--muted);font-weight:normal;margin-left:8px"></span></h2>
+      <div style="margin-bottom:8px">
+        <label>Send volume to:</label>
+        <select id="vol-addr">
+          <option value="">Audio System (default)</option>
+        </select>
+      </div>
+      <div class="btn-row">
+        <button onclick="volCmd('up')">Vol +</button>
+        <button onclick="volCmd('down')">Vol -</button>
+        <button onclick="volCmd('mute')">Mute</button>
+        <button class="sm" onclick="refreshAudioStatus()" style="margin-left:auto">Refresh</button>
+      </div>
+      <div id="vol-result" class="result"></div>
+    </div>
+
+    <!-- Navigation -->
+    <div class="card">
+      <h2>Navigation</h2>
+      <div style="margin-bottom:6px">
+        <label>Send keys to:</label>
+        <select id="nav-addr"></select>
+      </div>
+      <div class="dpad">
+        <div class="empty"></div>
+        <button onclick="sendKey('up')">&#9650;</button>
+        <div class="empty"></div>
+        <button onclick="sendKey('left')">&#9664;</button>
+        <button class="center" onclick="sendKey('select')">OK</button>
+        <button onclick="sendKey('right')">&#9654;</button>
+        <div class="empty"></div>
+        <button onclick="sendKey('down')">&#9660;</button>
+        <div class="empty"></div>
+      </div>
+      <div class="media-row">
+        <button onclick="sendKey('home')">Home</button>
+        <button onclick="sendKey('menu')">Menu</button>
+        <button onclick="sendKey('back')">Back</button>
+      </div>
+      <div class="media-row">
+        <button onclick="sendKey('play')">&#9654;&#xFE0E;</button>
+        <button onclick="sendKey('pause')">&#10074;&#10074;</button>
+        <button onclick="sendKey('stop')">&#9632;</button>
+      </div>
+      <div id="nav-result" class="result"></div>
+    </div>
+
+    <!-- Logs -->
+    <div class="card full">
+      <h2>Logs</h2>
+      <div class="btn-row" style="margin-bottom:8px">
+        <button onclick="loadLogs()">Refresh Logs</button>
+      </div>
+      <div id="logs-box" class="log-box"><span style="color:var(--muted)">Press Refresh to load.</span></div>
+    </div>
+
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    /* ── Helpers ─────────────────────────────────────────── */
+    var qs = function (s) { return document.querySelector(s); };
+    var devices = [];
+    var topology = null; // from /api/topology
+
+    function esc(s) {
+      var d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    function toast(msg, ok) {
+      var t = qs('#toast');
+      t.textContent = msg;
+      t.className = 'toast show ' + (ok ? 'ok' : 'fail');
+      setTimeout(function () { t.className = 'toast'; }, 2000);
+    }
+
+    function apiGet(url, target) {
+      fetch(url).then(function (r) { return r.json(); }).then(function (j) {
+        if (target) qs(target).innerHTML = fmtResponse(j);
+      }).catch(function (e) { if (target) qs(target).textContent = 'Error: ' + e; });
+    }
+
+    function apiPost(url, body, target) {
+      var opts = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
+      if (body) opts.body = JSON.stringify(body);
+      fetch(url, opts).then(function (r) { return r.json(); }).then(function (j) {
+        if (target) qs(target).innerHTML = fmtResponse(j);
+        toast(j.message, j.status === 'success');
+      }).catch(function (e) { if (target) qs(target).textContent = 'Error: ' + e; });
+    }
+
+    function fmtResponse(j) {
+      if (j.status === 'error') return '<span style="color:var(--accent)">' + esc(j.message) + '</span>';
+      var h = '<span style="color:var(--ok)">' + esc(j.message) + '</span>';
+      if (j.data && typeof j.data === 'object') {
+        if (Array.isArray(j.data)) {
+          for (var i = 0; i < j.data.length; i++) h += fmtObj(j.data[i]);
+        } else {
+          h += fmtObj(j.data);
+        }
+      }
+      return h;
+    }
+
+    function fmtObj(o) {
+      var parts = [];
+      for (var k in o) {
+        if (o.hasOwnProperty(k)) parts.push('<span style="color:var(--muted)">' + esc(k) + ':</span> ' + esc(String(o[k])));
+      }
+      return '<div style="margin-top:4px">' + parts.join(' &middot; ') + '</div>';
+    }
+
+    /* ── Populate selects from device list ────────────────── */
+    function populateSelect(sel, selectedAddr) {
+      sel.innerHTML = '';
+      for (var i = 0; i < devices.length; i++) {
+        var d = devices[i];
+        var label = d.logical_address + ' - ' + (d.osd_name || d.address_name);
+        var opt = document.createElement('option');
+        opt.value = d.logical_address;
+        opt.textContent = label;
+        if (d.logical_address === selectedAddr) opt.selected = true;
+        sel.appendChild(opt);
+      }
+    }
+
+    function populateAllSelects() {
+      var srcSel = qs('#source-addr');
+      var navSel = qs('#nav-addr');
+      var volSel = qs('#vol-addr');
+      var srcVal = srcSel.value ? parseInt(srcSel.value) : -1;
+      var navVal = navSel.value ? parseInt(navSel.value) : -1;
+      var volVal = volSel.value;
+      populateSelect(srcSel, srcVal);
+      populateSelect(navSel, navVal);
+      // Volume select: keep "Audio System (default)" as first option, then add devices
+      var defaultOpt = document.createElement('option');
+      defaultOpt.value = '';
+      defaultOpt.textContent = 'Audio System (default)';
+      volSel.innerHTML = '';
+      volSel.appendChild(defaultOpt);
+      for (var i = 0; i < devices.length; i++) {
+        var d = devices[i];
+        var label = d.logical_address + ' - ' + (d.osd_name || d.address_name);
+        var opt = document.createElement('option');
+        opt.value = d.logical_address;
+        opt.textContent = label;
+        if (String(d.logical_address) === volVal) opt.selected = true;
+        volSel.appendChild(opt);
+      }
+    }
+
+    /* ── Volume with optional device target ────────────── */
+    function volCmd(action) {
+      var addr = qs('#vol-addr').value;
+      var url = '/api/volume/' + action;
+      if (addr !== '') url += '/' + addr;
+      apiPost(url, null, '#vol-result');
+    }
+
+    /* ── Update standalone HDMI buttons panel ────────────── */
+    function updateHDMIPanel() {
+      var box = qs('#hdmi-buttons');
+      if (!box) return;
+      if (topology && topology.active_ports && topology.active_ports.length > 0) {
+        var html = '';
+        // Show all ports up to known_port_count
+        var maxPort = topology.known_port_count;
+        for (var pn = 1; pn <= maxPort; pn++) {
+          var portInfo = null;
+          for (var j = 0; j < topology.active_ports.length; j++) {
+            if (topology.active_ports[j].port === pn) { portInfo = topology.active_ports[j]; break; }
+          }
+          var label = 'HDMI ' + pn;
+          if (portInfo && portInfo.devices && portInfo.devices.length > 0) {
+            label += ' (' + esc(portInfo.devices.join(', ')) + ')';
+          }
+          var style = portInfo ? '' : ' style="opacity:.6"';
+          html += '<button onclick="apiPost(\'/api/hdmi/' + pn + '\',null,\'#source-result\')"' + style + '>' + label + '</button>';
+        }
+        box.innerHTML = html;
+      }
+      // else keep fallback buttons
+    }
+
+    /* ── Audio status ──────────────────────────────────── */
+    function refreshAudioStatus() {
+      fetch('/api/audio/status').then(function (r) { return r.json(); }).then(function (j) {
+        var el = qs('#audio-status');
+        if (j.status === 'success' && j.data) {
+          var vol = j.data.volume;
+          var muted = j.data.muted;
+          el.textContent = 'Vol: ' + vol + '%' + (muted ? ' (Muted)' : '');
+        } else {
+          el.textContent = '';
+        }
+      }).catch(function () {
+        qs('#audio-status').textContent = '';
+      });
+    }
+
+    /* ── Power status badge ───────────────────────────────── */
+    function powerBadge(status) {
+      var s = (status || 'Unknown').toLowerCase();
+      if (s === 'on') return '<span class="badge">On</span>';
+      if (s === 'standby') return '<span class="badge off">Standby</span>';
+      if (s.indexOf('transitioning') >= 0) return '<span class="badge warn">' + esc(status) + '</span>';
+      return '<span class="badge off">' + esc(status) + '</span>';
+    }
+
+    /* ── Check if a device is the adapter ─────────────────── */
+    function isOwnDevice(logAddr) {
+      if (!topology || !topology.own_addresses) return false;
+      for (var i = 0; i < topology.own_addresses.length; i++) {
+        if (topology.own_addresses[i] === logAddr) return true;
+      }
+      return false;
+    }
+
+    /* ── Build dynamic HDMI buttons for display card ──────── */
+    function hdmiButtons() {
+      // If we have topology data with active ports, show labelled buttons
+      if (topology && topology.active_ports && topology.active_ports.length > 0) {
+        var html = '';
+        for (var i = 0; i < topology.active_ports.length; i++) {
+          var p = topology.active_ports[i];
+          var label = 'HDMI ' + p.port;
+          if (p.devices && p.devices.length > 0) {
+            label += ' (' + esc(p.devices.join(', ')) + ')';
+          }
+          if (topology.own_port === p.port) {
+            label += ' *';
+          }
+          html += '<button class="sm" onclick="apiPost(\'/api/hdmi/' + p.port + '\',null,null)">' + label + '</button>';
+        }
+        // Also offer any lower port numbers that aren't in the active list
+        // (they may be empty but still exist)
+        var maxPort = topology.known_port_count;
+        for (var pn = 1; pn <= maxPort; pn++) {
+          var found = false;
+          for (var j = 0; j < topology.active_ports.length; j++) {
+            if (topology.active_ports[j].port === pn) { found = true; break; }
+          }
+          if (!found) {
+            html += '<button class="sm" style="opacity:.6" onclick="apiPost(\'/api/hdmi/' + pn + '\',null,null)">HDMI ' + pn + ' (empty)</button>';
+          }
+        }
+        return html;
+      }
+      // Fallback: no topology data, show generic HDMI 1-4
+      var fallback = '';
+      for (var k = 1; k <= 4; k++) {
+        fallback += '<button class="sm" onclick="apiPost(\'/api/hdmi/' + k + '\',null,null)">HDMI ' + k + '</button>';
+      }
+      return fallback;
+    }
+
+    /* ── Render device cards ──────────────────────────────── */
+    function renderDevices() {
+      var box = qs('#devices-result');
+      if (devices.length === 0) {
+        box.innerHTML = '<span style="color:var(--muted)">No devices found. Try Rescan.</span>';
+        return;
+      }
+      var html = '';
+      for (var i = 0; i < devices.length; i++) {
+        var d = devices[i];
+        var isActive = d.is_active_source;
+        var isDisplay = (d.logical_address === 0);
+        var isAdapter = isOwnDevice(d.logical_address);
+
+        html += '<div class="dev-card' + (isActive ? ' active-src' : '') + '">';
+        html += '<div class="dev-name">' + esc(d.osd_name || d.address_name);
+        if (isAdapter) html += ' <span class="badge" style="background:var(--accent2);color:#fff;font-size:.65rem">This adapter</span>';
+        html += '</div>';
+        html += '<div class="dev-meta">';
+        html += '<span class="badge off" style="font-size:.65rem;margin-right:4px">' + esc(d.device_type || d.address_name) + '</span>';
+        html += 'Addr ' + d.logical_address;
+        html += ' &middot; ' + esc(d.physical_address);
+        if (d.hdmi_port && d.hdmi_port > 0) html += ' &middot; HDMI ' + d.hdmi_port;
+        if (d.vendor_name) html += ' &middot; ' + esc(d.vendor_name);
+        if (d.cec_version && d.cec_version !== 'Unknown') html += ' &middot; CEC ' + esc(d.cec_version);
+        html += '</div>';
+        html += '<div class="dev-meta">';
+        html += 'Power: ' + powerBadge(d.power_status);
+        if (isActive) html += ' <span class="badge" style="margin-left:4px">Active Source</span>';
+        html += '</div>';
+        html += '<div class="dev-actions">';
+        html += '<span class="dev-actions-label">Power</span>';
+        html += '<button class="sm accent" onclick="devPowerOn(' + d.logical_address + ')">Power On</button>';
+        html += '<button class="sm" onclick="devPowerOff(' + d.logical_address + ')">Standby</button>';
+        html += '<button class="sm" onclick="devPowerStatus(' + d.logical_address + ')">Status</button>';
+
+        var hasInputActions = isDisplay || (!isDisplay && !isActive);
+        if (hasInputActions) {
+          html += '<hr class="dev-actions-divider">';
+          html += '<span class="dev-actions-label">Input / Source</span>';
+        }
+        if (!isDisplay && !isActive) {
+          html += '<button class="sm" onclick="devActivate(' + d.logical_address + ')" style="background:var(--accent2)">Set Active</button>';
+        }
+        if (isDisplay) {
+          html += hdmiButtons();
+        }
+        html += '</div>';
+        html += '</div>';
+      }
+      box.innerHTML = html;
+    }
+
+    /* ── Device actions ───────────────────────────────────── */
+    function devPowerOn(addr) {
+      apiPost('/api/power/on/' + addr, null, null);
+      setTimeout(function () { refreshDevices(false); }, 2000);
+    }
+
+    function devPowerOff(addr) {
+      apiPost('/api/power/off/' + addr, null, null);
+      setTimeout(function () { refreshDevices(false); }, 2000);
+    }
+
+    function devPowerStatus(addr) {
+      fetch('/api/power/status/' + addr).then(function (r) { return r.json(); }).then(function (j) {
+        if (j.status === 'success' && j.data) {
+          toast(j.data.status, true);
+        } else {
+          toast(j.message, false);
+        }
+      });
+    }
+
+    function devActivate(addr) {
+      apiPost('/api/source/' + addr, null, '#source-result');
+      setTimeout(function () { refreshDevices(false); }, 2000);
+    }
+
+    /* ── Fetch topology ──────────────────────────────────── */
+    function refreshTopology() {
+      fetch('/api/topology').then(function (r) { return r.json(); }).then(function (j) {
+        if (j.status === 'success' && j.data) {
+          topology = j.data;
+        }
+      }).catch(function () { /* ignore */ });
+    }
+
+    /* ── Refresh devices (main entry point) ───────────────── */
+    function refreshDevices(rescan) {
+      var url = '/api/devices' + (rescan ? '?rescan=1' : '');
+      var statusEl = qs('#dev-status');
+      var resultEl = qs('#devices-result');
+      statusEl.textContent = rescan ? 'Scanning bus...' : 'Refreshing...';
+
+      var slowTimer = setTimeout(function () {
+        statusEl.textContent = 'CEC bus queries are slow, please wait...';
+      }, 3000);
+
+      var controller = null;
+      var fetchOpts = {};
+      if (typeof AbortController !== 'undefined') {
+        controller = new AbortController();
+        fetchOpts.signal = controller.signal;
+        setTimeout(function () { controller.abort(); }, 25000);
+      }
+
+      fetch(url, fetchOpts).then(function (r) { return r.json(); }).then(function (j) {
+        clearTimeout(slowTimer);
+        statusEl.textContent = '';
+        if (j.status === 'success' && Array.isArray(j.data)) {
+          devices = j.data;
+          // Fetch topology then render (topology gives us port info for HDMI buttons)
+          fetch('/api/topology').then(function (r) { return r.json(); }).then(function (j) {
+            if (j.status === 'success' && j.data) topology = j.data;
+          }).catch(function () { }).then(function () {
+            renderDevices();
+            populateAllSelects();
+            updateHDMIPanel();
+            refreshAudioStatus();
+          });
+        } else {
+          resultEl.innerHTML = '<span style="color:var(--accent)">' + esc(j.message) + '</span>';
+        }
+      }).catch(function (e) {
+        clearTimeout(slowTimer);
+        statusEl.textContent = '';
+        var msg = String(e);
+        if (msg.indexOf('abort') >= 0 || msg.indexOf('Abort') >= 0) {
+          msg = 'Request timed out (CEC bus too slow)';
+        }
+        resultEl.innerHTML = '<span style="color:var(--accent)">' + esc(msg) + '</span>' +
+          ' <button class="sm" onclick="refreshDevices(false)">Retry</button>' +
+          ' <button class="sm" onclick="refreshDevices(true)">Retry with Rescan</button>';
+      });
+    }
+
+    /* ── Navigation keys ──────────────────────────────────── */
+    function sendKey(key) {
+      var addr = parseInt(qs('#nav-addr').value);
+      apiPost('/api/key', { address: addr, key: key }, '#nav-result');
+    }
+
+    /* ── Health and SSE live updates ───────────────────────── */
+    var eventSource = null;
+    var refreshDebounceTimer = null;
+
+    function setHealth(healthy, live) {
+      var el = qs('#health-badge');
+      var liveEl = qs('#live-badge');
+      el.textContent = healthy ? 'Healthy' : 'Offline';
+      el.className = 'badge' + (healthy ? '' : ' err');
+      if (liveEl) {
+        liveEl.style.display = live ? 'inline-block' : 'none';
+        liveEl.className = 'badge' + (live ? ' warn' : ' off');
+      }
+    }
+
+    var currentVersion = '';
+
+    function checkHealth() {
+      fetch('/api/health').then(function (r) { return r.json(); }).then(function (j) {
+        setHealth(j.status === 'success', false);
+        if (j.status === 'success' && j.data && j.data.version) {
+          currentVersion = j.data.version;
+          checkForUpdate();
+        }
+      }).catch(function () {
+        setHealth(false, false);
+      });
+    }
+
+    function checkForUpdate() {
+      if (!currentVersion || currentVersion === 'dev') return;
+      fetch('https://api.github.com/repos/LukasParke/capi/releases/latest')
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (j.tag_name && j.tag_name !== currentVersion) {
+            var badge = qs('#update-badge');
+            badge.textContent = 'Update: ' + j.tag_name;
+            badge.style.display = 'inline-block';
+          }
+        })
+        .catch(function () { /* ignore — offline or rate-limited */ });
+    }
+
+    function doUpdate() {
+      var badge = qs('#update-badge');
+      badge.textContent = 'Updating...';
+      badge.style.cursor = 'default';
+      fetch('/api/update', { method: 'POST' })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (j.status === 'success') {
+            toast(j.message, true);
+            badge.textContent = 'Restarting...';
+            // Poll until the service is back with the new version
+            setTimeout(function pollHealth() {
+              fetch('/api/health').then(function (r) { return r.json(); }).then(function (h) {
+                if (h.status === 'success') {
+                  location.reload();
+                } else {
+                  setTimeout(pollHealth, 2000);
+                }
+              }).catch(function () { setTimeout(pollHealth, 2000); });
+            }, 3000);
+          } else {
+            toast(j.message, false);
+            badge.textContent = 'Update failed';
+            badge.style.cursor = 'pointer';
+          }
+        })
+        .catch(function (e) {
+          toast('Update error: ' + e, false);
+          badge.textContent = 'Update failed';
+          badge.style.cursor = 'pointer';
+        });
+    }
+
+    function onCECEvent(ev) {
+      if (ev.type === 'source_activated' || ev.type === 'power_change') {
+        if (refreshDebounceTimer) clearTimeout(refreshDebounceTimer);
+        refreshDebounceTimer = setTimeout(function () {
+          refreshDevices(false);
+          refreshDebounceTimer = null;
+        }, 500);
+      }
+    }
+
+    function connectSSE() {
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+      var es = new EventSource('/api/events');
+      eventSource = es;
+      es.onopen = function () {
+        setHealth(true, true);
+      };
+      es.onmessage = function (e) {
+        try {
+          var ev = JSON.parse(e.data);
+          onCECEvent(ev);
+        } catch (err) { /* ignore */ }
+      };
+      es.onerror = function () {
+        setHealth(false, false);
+        es.close();
+        eventSource = null;
+        setTimeout(connectSSE, 3000);
+      };
+    }
+
+    /* ── Logs ─────────────────────────────────────────────── */
+    function loadLogs() {
+      var box = qs('#logs-box');
+      box.innerHTML = '<span style="color:var(--muted)">Loading...</span>';
+      fetch('/api/logs').then(function (r) { return r.json(); }).then(function (j) {
+        if (j.status === 'success' && Array.isArray(j.data)) {
+          if (j.data.length === 0) { box.innerHTML = '<span style="color:var(--muted)">No log entries.</span>'; return; }
+          var html = '';
+          for (var i = 0; i < j.data.length; i++) {
+            var l = j.data[i];
+            html += '<div class="log-line"><span class="lvl lvl-' + esc(l.level) + '">' + esc(l.level) + '</span>' + esc(l.message) + '</div>';
+          }
+          box.innerHTML = html;
+          box.scrollTop = box.scrollHeight;
+        } else {
+          box.innerHTML = '<span style="color:var(--accent)">' + esc(j.message) + '</span>';
+        }
+      }).catch(function (e) { box.textContent = 'Error: ' + e; });
+    }
+
+    /* ── Init ─────────────────────────────────────────────── */
+    checkHealth();
+    connectSSE();
+    refreshTopology();
+    refreshDevices(false);
+  </script>
+</body>
+
+</html>

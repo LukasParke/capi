@@ -1,0 +1,6 @@
+# Built-in HDMI CEC (e.g. Raspberry Pi /dev/cec0)
+SUBSYSTEM=="cec", KERNEL=="cec[0-9]*", MODE="0660", GROUP="capi"
+
+# Pulse-Eight USB-CEC adapters: allow capi group read/write access
+# Vendor ID 2548 (0x09F4) = Pulse-Eight
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2548", MODE="0660", GROUP="capi"

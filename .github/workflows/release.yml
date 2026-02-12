@@ -1,0 +1,74 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64,arm
+
+      - name: Generate version string
+        id: version
+        run: |
+          VERSION="v$(date -u +%Y%m%d.%H%M%S)-$(git rev-parse --short HEAD)"
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION"
+
+      - name: Build arm64 binary
+        run: |
+          docker run --rm \
+            --platform linux/arm64 \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            -e VERSION="${{ steps.version.outputs.VERSION }}" \
+            arm64v8/debian:bookworm bash -c '
+              set -e
+              apt-get update && apt-get install -y --no-install-recommends \
+                golang pkg-config libcec-dev ca-certificates
+              export CGO_ENABLED=1
+              export CGO_LDFLAGS="-Wl,--no-as-needed -lstdc++ -Wl,--as-needed"
+              go build -ldflags "-X main.version=${VERSION} -s -w" -o capi-linux-arm64 ./capi
+            '
+
+      - name: Build armv6 binary
+        run: |
+          docker run --rm \
+            --platform linux/arm/v6 \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            -e VERSION="${{ steps.version.outputs.VERSION }}" \
+            arm32v6/debian:bookworm bash -c '
+              set -e
+              apt-get update && apt-get install -y --no-install-recommends \
+                golang pkg-config libcec-dev ca-certificates
+              export CGO_ENABLED=1
+              export CGO_LDFLAGS="-Wl,--no-as-needed -lstdc++ -Wl,--as-needed"
+              go build -ldflags "-X main.version=${VERSION} -s -w" -o capi-linux-armv6 ./capi
+            '
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: ${{ steps.version.outputs.VERSION }}
+          body: "Automated release ${{ steps.version.outputs.VERSION }}"
+          files: |
+            capi-linux-arm64
+            capi-linux-armv6
+            install.sh
+            capi.service
+            99-cec.rules
+            capi/index.html

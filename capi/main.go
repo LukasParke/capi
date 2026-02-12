@@ -1,14 +1,23 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"capi/cec"
@@ -16,11 +25,68 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// version is set at build time via -ldflags "-X main.version=..."
+var version = "dev"
+
 var (
 	cecConn    *cec.Connection
 	cecMutex   sync.Mutex
 	logHandler *LogHandler
+	eventHub   *EventHub
 )
+
+// CECEvent represents a real-time event from the CEC bus.
+type CECEvent struct {
+	Type      string      `json:"type"`      // "key_press", "command", "source_activated", "power_change", "alert"
+	Timestamp time.Time   `json:"timestamp"`
+	Data      interface{} `json:"data"`
+}
+
+// EventHub is a simple pub/sub hub for CEC events. Subscribers receive events on a channel.
+type EventHub struct {
+	mu          sync.RWMutex
+	subs        map[chan CECEvent]struct{}
+	bufferSize  int
+}
+
+// NewEventHub creates an event hub with the given subscriber channel buffer size.
+func NewEventHub(bufferSize int) *EventHub {
+	return &EventHub{
+		subs:       make(map[chan CECEvent]struct{}),
+		bufferSize: bufferSize,
+	}
+}
+
+// Subscribe returns a channel that receives events. Caller must call Unsubscribe when done.
+func (h *EventHub) Subscribe() chan CECEvent {
+	ch := make(chan CECEvent, h.bufferSize)
+	h.mu.Lock()
+	h.subs[ch] = struct{}{}
+	h.mu.Unlock()
+	return ch
+}
+
+// Unsubscribe removes the channel from subscribers and closes it.
+func (h *EventHub) Unsubscribe(ch chan CECEvent) {
+	h.mu.Lock()
+	delete(h.subs, ch)
+	h.mu.Unlock()
+	close(ch)
+}
+
+// Publish sends the event to all subscribers. Non-blocking: if a subscriber's channel is full, the event is dropped for that subscriber.
+func (h *EventHub) Publish(ev CECEvent) {
+	ev.Timestamp = time.Now()
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for ch := range h.subs {
+		select {
+		case ch <- ev:
+		default:
+			// subscriber slow or disconnected; drop
+		}
+	}
+}
 
 // LogHandler implements cec.CallbackHandler for logging
 type LogHandler struct {
@@ -69,11 +135,47 @@ func (l *LogHandler) OnLogMessage(level cec.LogLevel, timestamp int64, message s
 
 func (l *LogHandler) OnKeyPress(key cec.Keycode, duration uint32) {
 	log.Printf("Key pressed: %d, duration: %d", key, duration)
+	if eventHub != nil {
+		eventHub.Publish(CECEvent{
+			Type: "key_press",
+			Data: map[string]interface{}{
+				"keycode":  int(key),
+				"duration": duration,
+			},
+		})
+	}
 }
 
 func (l *LogHandler) OnCommand(command *cec.Command) {
 	log.Printf("Command received: %s -> %s, opcode: 0x%02X",
 		command.Initiator.String(), command.Destination.String(), command.Opcode)
+	if eventHub != nil {
+		data := map[string]interface{}{
+			"initiator":   int(command.Initiator),
+			"destination": int(command.Destination),
+			"opcode":      fmt.Sprintf("0x%02X", command.Opcode),
+		}
+		// Emit power_change when we see ReportPowerStatus (initiator reports its status) or Standby
+		if command.Opcode == cec.OpcodeReportPowerStatus && len(command.Parameters) >= 1 {
+			eventHub.Publish(CECEvent{
+				Type: "power_change",
+				Data: map[string]interface{}{
+					"address": int(command.Initiator),
+					"status":  powerStatusFromByte(command.Parameters[0]),
+				},
+			})
+		}
+		if command.Opcode == cec.OpcodeStandby {
+			eventHub.Publish(CECEvent{
+				Type: "power_change",
+				Data: map[string]interface{}{
+					"address": int(command.Initiator),
+					"status":  "standby",
+				},
+			})
+		}
+		eventHub.Publish(CECEvent{Type: "command", Data: data})
+	}
 }
 
 func (l *LogHandler) OnConfigurationChanged(config *cec.Configuration) {
@@ -82,6 +184,15 @@ func (l *LogHandler) OnConfigurationChanged(config *cec.Configuration) {
 
 func (l *LogHandler) OnAlert(alert cec.Alert, param cec.Parameter) {
 	log.Printf("Alert: %d", alert)
+	if eventHub != nil {
+		eventHub.Publish(CECEvent{
+			Type: "alert",
+			Data: map[string]interface{}{
+				"alert": int(alert),
+				"param": param.Value,
+			},
+		})
+	}
 }
 
 func (l *LogHandler) OnMenuStateChanged(state cec.MenuState) bool {
@@ -91,6 +202,31 @@ func (l *LogHandler) OnMenuStateChanged(state cec.MenuState) bool {
 
 func (l *LogHandler) OnSourceActivated(address cec.LogicalAddress, activated bool) {
 	log.Printf("Source activated: %s, activated: %v", address.String(), activated)
+	if eventHub != nil {
+		eventHub.Publish(CECEvent{
+			Type: "source_activated",
+			Data: map[string]interface{}{
+				"address":    int(address),
+				"activated":  activated,
+			},
+		})
+	}
+}
+
+// powerStatusFromByte maps CEC power status byte to string.
+func powerStatusFromByte(b uint8) string {
+	switch b {
+	case 0x00:
+		return "on"
+	case 0x01:
+		return "standby"
+	case 0x02:
+		return "transitioning_to_on"
+	case 0x03:
+		return "transitioning_to_standby"
+	default:
+		return "unknown"
+	}
 }
 
 func (l *LogHandler) GetRecentLogs() []LogMessage {
@@ -133,42 +269,62 @@ func respondSuccess(w http.ResponseWriter, message string, data interface{}) {
 
 // Device endpoints
 
+func deviceToMap(dev *cec.Device) map[string]interface{} {
+	// Derive HDMI port from the first nibble of the physical address
+	hdmiPort := uint8(0)
+	if dev.PhysicalAddress != 0 && dev.PhysicalAddress != 0xFFFF {
+		hdmiPort = uint8((dev.PhysicalAddress >> 12) & 0xF)
+	}
+
+	return map[string]interface{}{
+		"logical_address":  int(dev.LogicalAddress),
+		"address_name":     dev.LogicalAddress.String(),
+		"physical_address": cec.PhysicalAddressToString(dev.PhysicalAddress),
+		"device_type":      cec.DeviceTypeForAddress(dev.LogicalAddress).String(),
+		"hdmi_port":        int(hdmiPort),
+		"vendor_id":        fmt.Sprintf("0x%06X", dev.VendorID),
+		"vendor_name":      cec.GetVendorName(dev.VendorID),
+		"cec_version":      dev.CECVersion.String(),
+		"power_status":     dev.PowerStatus.String(),
+		"osd_name":         dev.OSDName,
+		"menu_language":    dev.MenuLanguage,
+		"is_active":        dev.IsActive,
+		"is_active_source": dev.IsActiveSource,
+	}
+}
+
 func getDevicesHandler(w http.ResponseWriter, r *http.Request) {
 	// Optionally force a rescan when requested by the client.
 	rescanParam := r.URL.Query().Get("rescan")
 
+	// Step 1: rescan (if requested) and get active address list — fast, hold lock briefly.
 	cecMutex.Lock()
-	var (
-		devices []*cec.Device
-		err     error
-	)
 	if rescanParam == "1" || strings.EqualFold(rescanParam, "true") {
-		devices, err = cecConn.GetAllDevices()
-	} else {
-		devices, err = cecConn.GetAllDevicesNoRescan()
+		cecConn.RescanDevices()
 	}
+	addresses := cecConn.GetActiveDevices()
 	cecMutex.Unlock()
 
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	// Step 2: query each device individually with a 20s overall deadline.
+	// Each GetDeviceInfo call does several CEC queries that can be slow.
+	deadline := time.After(20 * time.Second)
+	result := make([]map[string]interface{}, 0, len(addresses))
 
-	// Convert to JSON-friendly format
-	result := make([]map[string]interface{}, len(devices))
-	for i, dev := range devices {
-		result[i] = map[string]interface{}{
-			"logical_address":  int(dev.LogicalAddress),
-			"address_name":     dev.LogicalAddress.String(),
-			"physical_address": cec.PhysicalAddressToString(dev.PhysicalAddress),
-			"vendor_id":        fmt.Sprintf("0x%06X", dev.VendorID),
-			"vendor_name":      cec.GetVendorName(dev.VendorID),
-			"cec_version":      dev.CECVersion.String(),
-			"power_status":     dev.PowerStatus.String(),
-			"osd_name":         dev.OSDName,
-			"menu_language":    dev.MenuLanguage,
-			"is_active":        dev.IsActive,
-			"is_active_source": dev.IsActiveSource,
+	for _, addr := range addresses {
+		select {
+		case <-deadline:
+			// Time's up — return what we have so far.
+			respondSuccess(w, fmt.Sprintf("Devices retrieved (partial: %d of %d, CEC bus slow)", len(result), len(addresses)), result)
+			return
+		default:
+		}
+
+		cecMutex.Lock()
+		dev, err := cecConn.GetDeviceInfo(addr)
+		cecMutex.Unlock()
+
+		if err == nil {
+			result = append(result, deviceToMap(dev))
 		}
 	}
 
@@ -297,41 +453,94 @@ func getPowerStatusHandler(w http.ResponseWriter, r *http.Request) {
 // Volume control endpoints
 
 func volumeUpHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	addrStr := vars["address"]
+
 	cecMutex.Lock()
 	defer cecMutex.Unlock()
 
+	if addrStr != "" {
+		// Send volume key directly to a specific device
+		addr, err := strconv.Atoi(addrStr)
+		if err != nil || addr < 0 || addr > 15 {
+			respondError(w, http.StatusBadRequest, "invalid address")
+			return
+		}
+		err = cecConn.SendVolumeKey(cec.LogicalAddress(addr), cec.KeycodeVolumeUp)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		respondSuccess(w, fmt.Sprintf("Volume up sent to device %d", addr), nil)
+		return
+	}
+
+	// Default: send to audio system via libcec
 	err := cecConn.VolumeUp(true)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
 	respondSuccess(w, "Volume up command sent", nil)
 }
 
 func volumeDownHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	addrStr := vars["address"]
+
 	cecMutex.Lock()
 	defer cecMutex.Unlock()
+
+	if addrStr != "" {
+		addr, err := strconv.Atoi(addrStr)
+		if err != nil || addr < 0 || addr > 15 {
+			respondError(w, http.StatusBadRequest, "invalid address")
+			return
+		}
+		err = cecConn.SendVolumeKey(cec.LogicalAddress(addr), cec.KeycodeVolumeDown)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		respondSuccess(w, fmt.Sprintf("Volume down sent to device %d", addr), nil)
+		return
+	}
 
 	err := cecConn.VolumeDown(true)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
 	respondSuccess(w, "Volume down command sent", nil)
 }
 
 func muteHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	addrStr := vars["address"]
+
 	cecMutex.Lock()
 	defer cecMutex.Unlock()
+
+	if addrStr != "" {
+		addr, err := strconv.Atoi(addrStr)
+		if err != nil || addr < 0 || addr > 15 {
+			respondError(w, http.StatusBadRequest, "invalid address")
+			return
+		}
+		err = cecConn.SendVolumeKey(cec.LogicalAddress(addr), cec.KeycodeMute)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		respondSuccess(w, fmt.Sprintf("Mute sent to device %d", addr), nil)
+		return
+	}
 
 	err := cecConn.AudioToggleMute()
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
 	respondSuccess(w, "Mute toggle command sent", nil)
 }
 
@@ -380,8 +589,8 @@ func setHDMIPortHandler(w http.ResponseWriter, r *http.Request) {
 	portStr := vars["port"]
 
 	port, err := strconv.Atoi(portStr)
-	if err != nil || port < 1 || port > 4 {
-		respondError(w, http.StatusBadRequest, "Invalid HDMI port (must be 1-4)")
+	if err != nil || port < 1 || port > 15 {
+		respondError(w, http.StatusBadRequest, "Invalid HDMI port (must be 1-15)")
 		return
 	}
 
@@ -532,6 +741,308 @@ func getLogsHandler(w http.ResponseWriter, r *http.Request) {
 	respondSuccess(w, "Logs retrieved", logs)
 }
 
+// SSE endpoint: GET /api/events streams CEC events as Server-Sent Events.
+func eventsSSEHandler(w http.ResponseWriter, r *http.Request) {
+	if eventHub == nil {
+		respondError(w, http.StatusInternalServerError, "event hub not initialized")
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		respondError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	ch := eventHub.Subscribe()
+	defer eventHub.Unsubscribe(ch)
+
+	// Send keepalive comment every 15s so proxies don't close the connection
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			body, err := json.Marshal(ev)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "data: %s\n\n", body)
+			flusher.Flush()
+		case <-ticker.C:
+			fmt.Fprintf(w, ": keepalive\n\n")
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+// Topology endpoint
+
+func getTopologyHandler(w http.ResponseWriter, r *http.Request) {
+	cecMutex.Lock()
+	topo := cecConn.GetBusTopology()
+	ownAddrs := cecConn.GetLogicalAddresses()
+	cecMutex.Unlock()
+
+	// Build port list with device names for the UI
+	type portDetail struct {
+		Port    int      `json:"port"`
+		Devices []string `json:"devices"`
+	}
+	ports := make([]portDetail, 0, len(topo.ActivePorts))
+	for _, p := range topo.ActivePorts {
+		names := make([]string, 0, len(p.Devices))
+		for _, addr := range p.Devices {
+			cecMutex.Lock()
+			name, _ := cecConn.GetDeviceOSDName(addr)
+			cecMutex.Unlock()
+			if name == "" {
+				name = addr.String()
+			}
+			names = append(names, name)
+		}
+		ports = append(ports, portDetail{Port: int(p.Port), Devices: names})
+	}
+
+	ownAddrInts := make([]int, len(ownAddrs))
+	for i, a := range ownAddrs {
+		ownAddrInts[i] = int(a)
+	}
+
+	respondSuccess(w, "Bus topology retrieved", map[string]interface{}{
+		"own_addresses":    ownAddrInts,
+		"own_port":         int(topo.OwnPort),
+		"known_port_count": int(topo.KnownPortCount),
+		"active_ports":     ports,
+	})
+}
+
+// Audio status endpoint
+
+func getAudioStatusHandler(w http.ResponseWriter, r *http.Request) {
+	cecMutex.Lock()
+	volume, muted, err := cecConn.GetAudioStatus()
+	cecMutex.Unlock()
+
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondSuccess(w, "Audio status retrieved", map[string]interface{}{
+		"volume": int(volume),
+		"muted":  muted,
+	})
+}
+
+// ── Self-update logic ──────────────────────────────────────────────────
+
+const updateRepo = "LukasParke/capi"
+
+var updateHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+// releaseInfo holds metadata about a GitHub release.
+type releaseInfo struct {
+	TagName string        `json:"tag_name"`
+	Assets  []releaseAsset `json:"assets"`
+}
+
+type releaseAsset struct {
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+}
+
+// checkForUpdate queries the GitHub releases API and returns info about the
+// latest release. Returns nil if the current version is already up to date.
+func checkForUpdate() (*releaseInfo, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", updateRepo)
+	resp, err := updateHTTPClient.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query GitHub: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GitHub API returned %d", resp.StatusCode)
+	}
+
+	var info releaseInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return nil, fmt.Errorf("failed to parse release JSON: %w", err)
+	}
+
+	if info.TagName == version {
+		return nil, nil // already up to date
+	}
+
+	return &info, nil
+}
+
+// assetURL finds the download URL for the named asset in a release.
+func assetURL(info *releaseInfo, name string) string {
+	for _, a := range info.Assets {
+		if a.Name == name {
+			return a.BrowserDownloadURL
+		}
+	}
+	return ""
+}
+
+// binaryAssetName returns the release asset name for the current architecture.
+func binaryAssetName() string {
+	switch runtime.GOARCH {
+	case "arm64":
+		return "capi-linux-arm64"
+	case "arm":
+		return "capi-linux-armv6"
+	default:
+		return "capi-linux-arm64"
+	}
+}
+
+// downloadFile downloads a URL to a local file path.
+func downloadFile(url, dest string) error {
+	resp, err := updateHTTPClient.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download returned %d", resp.StatusCode)
+	}
+
+	tmp := dest + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	f.Close()
+
+	if err := os.Chmod(tmp, 0755); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+
+	return os.Rename(tmp, dest)
+}
+
+// performUpdate downloads the new binary and index.html from the given release.
+func performUpdate(info *releaseInfo) error {
+	binName := binaryAssetName()
+	binURL := assetURL(info, binName)
+	if binURL == "" {
+		return fmt.Errorf("release %s has no asset %s", info.TagName, binName)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "/opt/capi/capi"
+	}
+	installDir := filepath.Dir(exe)
+
+	log.Printf("Downloading %s from %s ...", binName, info.TagName)
+	if err := downloadFile(binURL, filepath.Join(installDir, "capi")); err != nil {
+		return fmt.Errorf("binary download failed: %w", err)
+	}
+
+	// Also update index.html if present in release assets
+	htmlURL := assetURL(info, "index.html")
+	if htmlURL != "" {
+		log.Println("Downloading updated index.html ...")
+		if err := downloadFile(htmlURL, filepath.Join(installDir, "index.html")); err != nil {
+			log.Printf("Warning: index.html download failed: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// restartService asks systemd to restart the capi service.
+func restartService() error {
+	cmd := exec.Command("systemctl", "restart", "capi.service")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// doSelfUpdate is the CLI entry-point for `capi -update`.
+func doSelfUpdate() {
+	log.Printf("Current version: %s", version)
+	log.Println("Checking for updates...")
+
+	info, err := checkForUpdate()
+	if err != nil {
+		log.Fatalf("Update check failed: %v", err)
+	}
+	if info == nil {
+		log.Println("Already up to date.")
+		os.Exit(0)
+	}
+
+	log.Printf("Update available: %s -> %s", version, info.TagName)
+
+	if err := performUpdate(info); err != nil {
+		log.Fatalf("Update failed: %v", err)
+	}
+
+	log.Println("Update downloaded. Restarting service...")
+	if err := restartService(); err != nil {
+		log.Printf("Could not restart service: %v (you may need to restart manually)", err)
+	}
+	os.Exit(0)
+}
+
+// POST /api/update handler
+
+func updateHandler(w http.ResponseWriter, r *http.Request) {
+	info, err := checkForUpdate()
+	if err != nil {
+		respondError(w, http.StatusBadGateway, fmt.Sprintf("Update check failed: %v", err))
+		return
+	}
+	if info == nil {
+		respondSuccess(w, "Already up to date", map[string]interface{}{
+			"version": version,
+		})
+		return
+	}
+
+	if err := performUpdate(info); err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("Update failed: %v", err))
+		return
+	}
+
+	respondSuccess(w, fmt.Sprintf("Updated to %s, restarting...", info.TagName), map[string]interface{}{
+		"old_version": version,
+		"new_version": info.TagName,
+	})
+
+	// Restart after a short delay so the HTTP response is sent first
+	go func() {
+		time.Sleep(1 * time.Second)
+		restartService()
+	}()
+}
+
 // Health check
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -551,7 +1062,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	cecMutex.Unlock()
 
 	respondSuccess(w, "Service is healthy", map[string]interface{}{
-		"version": "1.0.0",
+		"version": version,
 		"libcec":  libInfo,
 	})
 }
@@ -560,7 +1071,19 @@ func main() {
 	bindAddr := flag.String("bind", ":8080", "Bind address (e.g., :8080 for all interfaces, localhost:8080 for local only)")
 	deviceName := flag.String("name", "CEC HTTP Bridge", "Device name")
 	adapterPath := flag.String("adapter", "", "CEC adapter path (auto-detect if empty)")
+	showVersion := flag.Bool("version", false, "Print version and exit")
+	doUpdate := flag.Bool("update", false, "Check for updates and install the latest release")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		os.Exit(0)
+	}
+
+	if *doUpdate {
+		doSelfUpdate()
+		return
+	}
 
 	// Initialize CEC
 	log.Println("Initializing CEC connection...")
@@ -571,7 +1094,8 @@ func main() {
 	}
 	defer cecConn.Close()
 
-	// Set up logging
+	// Set up event hub and logging
+	eventHub = NewEventHub(64)
 	logHandler = NewLogHandler()
 	cecConn.SetCallbackHandler(logHandler)
 
@@ -582,8 +1106,13 @@ func main() {
 		if err != nil || len(adapters) == 0 {
 			log.Fatalf("No CEC adapters found")
 		}
-		*adapterPath = adapters[0].Path
-		log.Printf("Found adapter: %s (%s)", adapters[0].Path, adapters[0].Comm)
+		// Prefer device path (e.g. /dev/cec0) for opening; Path may be sysfs (e.g. built-in HDMI CEC)
+		if adapters[0].Comm != "" && strings.HasPrefix(adapters[0].Comm, "/dev/") {
+			*adapterPath = adapters[0].Comm
+		} else {
+			*adapterPath = adapters[0].Path
+		}
+		log.Printf("Found adapter: %s", *adapterPath)
 	}
 
 	log.Printf("Opening CEC adapter: %s", *adapterPath)
@@ -600,6 +1129,19 @@ func main() {
 	// Set up HTTP router
 	r := mux.NewRouter()
 
+	// Web UI — load index.html from same directory as the binary
+	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		exe, _ := os.Executable()
+		htmlPath := filepath.Join(filepath.Dir(exe), "index.html")
+		data, err := ioutil.ReadFile(htmlPath)
+		if err != nil {
+			http.Error(w, "UI not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(data)
+	}).Methods("GET")
+
 	// Device endpoints
 	r.HandleFunc("/api/devices", getDevicesHandler).Methods("GET")
 	r.HandleFunc("/api/devices/{address}", getDeviceHandler).Methods("GET")
@@ -614,13 +1156,22 @@ func main() {
 
 	// Volume control
 	r.HandleFunc("/api/volume/up", volumeUpHandler).Methods("POST")
+	r.HandleFunc("/api/volume/up/{address}", volumeUpHandler).Methods("POST")
 	r.HandleFunc("/api/volume/down", volumeDownHandler).Methods("POST")
+	r.HandleFunc("/api/volume/down/{address}", volumeDownHandler).Methods("POST")
 	r.HandleFunc("/api/volume/mute", muteHandler).Methods("POST")
+	r.HandleFunc("/api/volume/mute/{address}", muteHandler).Methods("POST")
 
 	// Source control
 	r.HandleFunc("/api/source/active", getActiveSourceHandler).Methods("GET")
 	r.HandleFunc("/api/source/{address}", setActiveSourceHandler).Methods("POST")
 	r.HandleFunc("/api/hdmi/{port}", setHDMIPortHandler).Methods("POST")
+
+	// Topology
+	r.HandleFunc("/api/topology", getTopologyHandler).Methods("GET")
+
+	// Audio status
+	r.HandleFunc("/api/audio/status", getAudioStatusHandler).Methods("GET")
 
 	// Navigation
 	r.HandleFunc("/api/key", sendKeyHandler).Methods("POST")
@@ -631,14 +1182,34 @@ func main() {
 	// Logs
 	r.HandleFunc("/api/logs", getLogsHandler).Methods("GET")
 
+	// Server-Sent Events (real-time CEC bus events)
+	r.HandleFunc("/api/events", eventsSSEHandler).Methods("GET")
+
 	// Health
 	r.HandleFunc("/api/health", healthHandler).Methods("GET")
 
-	// Start server
-	log.Printf("Starting HTTP server on %s", *bindAddr)
-	log.Printf("API documentation: http://%s/api/health", *bindAddr)
+	// Self-update
+	r.HandleFunc("/api/update", updateHandler).Methods("POST")
 
-	if err := http.ListenAndServe(*bindAddr, r); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	// Start server with graceful shutdown (signal.Notify works on Go 1.15+)
+	server := &http.Server{Addr: *bindAddr, Handler: r}
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		log.Printf("Starting HTTP server on %s", *bindAddr)
+		log.Printf("API documentation: http://%s/api/health", *bindAddr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server failed: %v", err)
+		}
+	}()
+
+	<-sigChan
+	log.Println("Shutting down...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP server shutdown: %v", err)
 	}
+	// cecConn.Close() runs via defer at top of main
 }

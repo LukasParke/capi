@@ -90,25 +90,52 @@ func (c *Connection) WaitForDeviceReady(address LogicalAddress, targetState Powe
 	return fmt.Errorf("timeout waiting for device %d to reach state %v", address, targetState)
 }
 
-// SwitchToHDMIPort switches TV input to a specific HDMI port
-func (c *Connection) SwitchToHDMIPort(port uint8) error {
-	// Standard physical address mapping for HDMI ports
-	// Port 1: 1.0.0.0 (0x1000)
-	// Port 2: 2.0.0.0 (0x2000)
-	// Port 3: 3.0.0.0 (0x3000)
-	// Port 4: 4.0.0.0 (0x4000)
+// getOwnAddress returns the adapter's own logical address on the CEC bus.
+func (c *Connection) getOwnAddress() LogicalAddress {
+	addrs := c.GetLogicalAddresses()
+	if len(addrs) > 0 {
+		return addrs[0]
+	}
+	// Fallback: use unregistered/free-use address so transmit doesn't fail
+	// due to an address the adapter doesn't own.
+	return LogicalAddressFreeUse
+}
 
-	if port < 1 || port > 4 {
-		return fmt.Errorf("invalid HDMI port %d (must be 1-4)", port)
+// sendImageViewOn sends Image View On (0x04) to the TV to wake it up and
+// ensure it is ready to process source-switching commands.
+func (c *Connection) sendImageViewOn() error {
+	cmd := &Command{
+		Initiator:   c.getOwnAddress(),
+		Destination: LogicalAddressTV,
+		Opcode:      OpcodeImageViewOn,
+		OpcodeSet:   true,
+	}
+	return c.Transmit(cmd)
+}
+
+// SwitchToHDMIPort switches TV input to a specific HDMI port.
+// Uses libcec's built-in SetHDMIPort as the primary method (which handles
+// CEC protocol correctly), with an Active Source broadcast as fallback.
+func (c *Connection) SwitchToHDMIPort(port uint8) error {
+	if port < 1 || port > 15 {
+		return fmt.Errorf("invalid HDMI port %d (must be 1-15)", port)
 	}
 
-	physicalAddress := uint16(port) << 12 // Shift port number to first nibble
+	// Wake up the TV first so it processes the source switch
+	c.sendImageViewOn()
+	time.Sleep(300 * time.Millisecond)
 
-	// Send Set Stream Path command
+	// Primary: use libcec's built-in HDMI port switching
+	if err := c.SetHDMIPort(LogicalAddressTV, port); err == nil {
+		return nil
+	}
+
+	// Fallback: send Active Source broadcast with the port's physical address
+	physicalAddress := uint16(port) << 12
 	cmd := &Command{
-		Initiator:   LogicalAddressPlaybackDevice1,
+		Initiator:   c.getOwnAddress(),
 		Destination: LogicalAddressBroadcast,
-		Opcode:      OpcodeSetStreamPath,
+		Opcode:      OpcodeActiveSource,
 		OpcodeSet:   true,
 		Parameters: []uint8{
 			uint8(physicalAddress >> 8),
@@ -121,13 +148,9 @@ func (c *Connection) SwitchToHDMIPort(port uint8) error {
 
 // SwitchToDevice switches to a specific device by its logical address
 func (c *Connection) SwitchToDevice(address LogicalAddress) error {
-	// First power on the device if needed
-	if err := c.PowerOn(address); err != nil {
-		return fmt.Errorf("failed to power on device: %w", err)
-	}
-
-	// Wait a bit for device to power on
-	time.Sleep(500 * time.Millisecond)
+	// Wake up the TV so it is ready to process the source switch
+	c.sendImageViewOn()
+	time.Sleep(300 * time.Millisecond)
 
 	// Get device's physical address
 	physAddr, err := c.GetDevicePhysicalAddress(address)
@@ -135,11 +158,12 @@ func (c *Connection) SwitchToDevice(address LogicalAddress) error {
 		return fmt.Errorf("failed to get physical address: %w", err)
 	}
 
-	// Send Set Stream Path to the device's physical address
+	// Send Active Source broadcast with the target device's physical address.
+	// TVs respond to Active Source by switching to the corresponding input.
 	cmd := &Command{
-		Initiator:   LogicalAddressPlaybackDevice1,
+		Initiator:   c.getOwnAddress(),
 		Destination: LogicalAddressBroadcast,
-		Opcode:      OpcodeSetStreamPath,
+		Opcode:      OpcodeActiveSource,
 		OpcodeSet:   true,
 		Parameters: []uint8{
 			uint8(physAddr >> 8),
@@ -148,6 +172,100 @@ func (c *Connection) SwitchToDevice(address LogicalAddress) error {
 	}
 
 	return c.Transmit(cmd)
+}
+
+// SendVolumeKey sends a volume key press directly to a specific device address.
+// Uses wait=true so libcec waits for bus acknowledgment, and a longer hold
+// time so the target device registers the key press.
+func (c *Connection) SendVolumeKey(address LogicalAddress, key Keycode) error {
+	// Send press with wait=true for ACK
+	if err := c.SendKeypress(address, key, true); err != nil {
+		return err
+	}
+
+	// Hold the key long enough for the device to register it
+	time.Sleep(300 * time.Millisecond)
+
+	// Release with wait=true
+	return c.SendKeyRelease(address, true)
+}
+
+// PortInfo describes one HDMI port on the display and which devices are on it.
+type PortInfo struct {
+	Port    uint8            `json:"port"`
+	Devices []LogicalAddress `json:"devices"`
+}
+
+// BusTopology describes the HDMI bus as seen through CEC.
+type BusTopology struct {
+	OwnAddress     LogicalAddress `json:"own_address"`
+	OwnPort        uint8          `json:"own_port"`          // HDMI port the adapter is on (0 = unknown)
+	ActivePorts    []PortInfo     `json:"active_ports"`      // ports with at least one device
+	KnownPortCount uint8          `json:"known_port_count"`  // highest port number observed
+}
+
+// GetBusTopology builds a topology of the CEC bus by inspecting the physical
+// addresses of all active devices and grouping them by HDMI port.
+func (c *Connection) GetBusTopology() *BusTopology {
+	topo := &BusTopology{}
+
+	// Determine the adapter's own address
+	topo.OwnAddress = c.getOwnAddress()
+
+	// Get adapter's physical address to determine which port it sits on
+	if topo.OwnAddress != LogicalAddressFreeUse && topo.OwnAddress != LogicalAddressBroadcast {
+		if physAddr, err := c.GetDevicePhysicalAddress(topo.OwnAddress); err == nil && physAddr != 0 && physAddr != 0xFFFF {
+			topo.OwnPort = uint8((physAddr >> 12) & 0xF)
+		}
+	}
+
+	// Collect all active devices and group by port
+	portMap := make(map[uint8][]LogicalAddress)
+	for _, addr := range c.GetActiveDevices() {
+		// Skip TV (address 0) — it IS the display, not on a port
+		if addr == LogicalAddressTV {
+			continue
+		}
+		physAddr, err := c.GetDevicePhysicalAddress(addr)
+		if err != nil || physAddr == 0 || physAddr == 0xFFFF {
+			continue
+		}
+		port := uint8((physAddr >> 12) & 0xF)
+		if port == 0 {
+			continue // 0.x.x.x means internal / unknown
+		}
+		portMap[port] = append(portMap[port], addr)
+		if port > topo.KnownPortCount {
+			topo.KnownPortCount = port
+		}
+	}
+
+	// Build sorted port list
+	for p := uint8(1); p <= topo.KnownPortCount; p++ {
+		if devs, ok := portMap[p]; ok {
+			topo.ActivePorts = append(topo.ActivePorts, PortInfo{Port: p, Devices: devs})
+		}
+	}
+
+	return topo
+}
+
+// DeviceTypeForAddress returns the expected DeviceType for a logical address.
+func DeviceTypeForAddress(addr LogicalAddress) DeviceType {
+	switch addr {
+	case LogicalAddressTV:
+		return DeviceTypeTV
+	case LogicalAddressRecordingDevice1, LogicalAddressRecordingDevice2, LogicalAddressRecordingDevice3:
+		return DeviceTypeRecordingDevice
+	case LogicalAddressTuner1, LogicalAddressTuner2, LogicalAddressTuner3, LogicalAddressTuner4:
+		return DeviceTypeTuner
+	case LogicalAddressPlaybackDevice1, LogicalAddressPlaybackDevice2, LogicalAddressPlaybackDevice3:
+		return DeviceTypePlaybackDevice
+	case LogicalAddressAudioSystem:
+		return DeviceTypeAudioSystem
+	default:
+		return DeviceTypeReserved
+	}
 }
 
 // GetVendorName returns a human-readable vendor name

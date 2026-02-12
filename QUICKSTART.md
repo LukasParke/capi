@@ -1,33 +1,33 @@
 # Quick Start Guide
 
+Build and deploy **directly on a Raspberry Pi** (or similar device with a CEC adapter). There is no cross-compilation: you run `make build` and `make deploy` on the Pi itself.
+
 ## Installation (5 minutes)
 
 ### 1. Install Dependencies
 
-```bash
-# Update package list
-sudo apt-get update
+On the Raspberry Pi (Raspberry Pi OS, or Debian/Ubuntu):
 
-# Install libcec and development files
+```bash
+# Option A: use make setup (recommended on Pi)
+sudo make setup
+
+# Option B: install manually
+sudo apt-get update
 sudo apt-get install -y libcec-dev libcec6 cec-utils pkg-config
 
-# Install Go (if not already installed)
-wget https://go.dev/dl/go1.21.0.linux-arm64.tar.gz
-sudo tar -C /usr/local -xzf go1.21.0.linux-arm64.tar.gz
-export PATH=$PATH:/usr/local/go/bin
+# Go: on Raspberry Pi OS either use the package manager or official tarball
+sudo apt-get install -y golang-go
+# Or for a newer Go: https://go.dev/dl/ — use linux/arm64 (Pi 3/4/5) or linux/armv6l (Pi Zero/1)
 ```
 
 ### 2. Build the Project
 
+On the Pi, in the project directory:
+
 ```bash
-# Navigate to project directory
 cd /path/to/capi
-
-# Initialize Go modules
-go mod init capi
 go mod tidy
-
-# Build
 make build
 ```
 
@@ -46,8 +46,13 @@ go run ./examples/example.go
 
 ### 4. Install as Service (Optional)
 
+Still on the Pi:
+
 ```bash
-# Install and enable service
+# One-command deploy (install, enable, and start)
+sudo make deploy
+
+# Or step by step:
 sudo make install
 sudo systemctl enable capi
 sudo systemctl start capi
@@ -55,6 +60,8 @@ sudo systemctl start capi
 # Check it's running
 sudo systemctl status capi
 ```
+
+The service runs as the system user `capi` and listens on all interfaces (port 8080), so other devices on your network can reach it (e.g. `http://<pi-ip>:8080/api/health`). The `platform/` directory is optional when using the system `libcec-dev` package.
 
 ## First API Calls
 
@@ -102,25 +109,27 @@ sudo reboot
 
 **Solution:**
 ```bash
-# Check permissions
-sudo chmod 666 /dev/ttyACM0
-
-# Or add permanent udev rule
-echo 'SUBSYSTEM=="tty", ATTRS{idVendor}=="2548", ATTRS{idProduct}=="1001", MODE="0666"' | sudo tee /etc/udev/rules.d/99-cec.rules
+# Ensure udev rules are loaded (make install installs 99-cec.rules for group capi)
 sudo udevadm control --reload-rules
+# Unplug and replug the USB CEC adapter so the rule applies to the device
+
+# Temporary fix: relax permissions (not needed if udev rule is correct)
+sudo chmod 666 /dev/ttyACM0
 ```
 
-### "Service won't start"
+### "Service won't start" (exit-code / activating (auto-restart))
 
 **Solution:**
 ```bash
-# Check logs
-sudo journalctl -u capi -n 50
+# 1. See why it failed (most important)
+sudo journalctl -u capi -n 80 --no-pager
 
-# Try running manually to see errors
-sudo -u pi /opt/capi/capi
+# 2. Run as the service user to reproduce the error
+sudo -u capi /opt/capi/capi -bind :8080 -name "CEC HTTP Bridge"
 
-# Check if port is already in use
+# 3. If "No CEC adapters found": plug in the USB CEC adapter, then sudo systemctl restart capi
+# 4. If "Failed to open CEC adapter": check device exists and udev rules (see "Failed to open adapter" above)
+# 5. Check if port is already in use
 sudo lsof -i :8080
 ```
 

@@ -2,6 +2,8 @@
 
 A comprehensive Go package and HTTP service for controlling HDMI-CEC devices. Provides full libcec bindings with idiomatic Go interfaces and a REST API for remote control.
 
+**Deployment:** Build and run directly on a Raspberry Pi (or similar); no cross-compilation. Use `make setup` then `make deploy` on the device.
+
 ## Features
 
 - **Complete libcec bindings** via cgo
@@ -29,44 +31,42 @@ A comprehensive Go package and HTTP service for controlling HDMI-CEC devices. Pr
 
 ## Installation
 
+Target: **Raspberry Pi** (or other ARM SBC). Build natively on the device.
+
 ### Prerequisites
 
+On the Pi (Raspberry Pi OS / Debian / Ubuntu):
+
 ```bash
-# Install libcec development files
+# Install libcec and build tools
 sudo apt-get update
-sudo apt-get install -y libcec-dev libcec6 cec-utils
+sudo apt-get install -y libcec-dev libcec6 cec-utils pkg-config
 
-# Install Go 1.21+
-# See https://golang.org/doc/install
-
-# Install pkg-config
-sudo apt-get install -y pkg-config
+# Install Go 1.21+ (Raspberry Pi OS: sudo apt-get install -y golang-go, or from https://go.dev/dl/ — linux/arm64 or armv6l)
 ```
+
+Or run `sudo make setup` to install the above (except Go, which you may install separately).
 
 ### Building
 
+On the Pi:
+
 ```bash
-# Clone or create project
 cd /path/to/capi
-
-# Initialize Go modules
-go mod init capi
 go mod tidy
-
-# Build the service
-go build -o capi ./capi
-
-# Or use make
 make build
 ```
+
+**Note:** The `platform/` directory (Pulse-Eight p8-platform) is in `.gitignore`. It is not required when building with the system `libcec-dev` package. Only clone or add it if you are building libcec from source.
 
 ### Installation as System Service
 
 ```bash
-# Build and install
-sudo make install
+# One-command deploy (install, enable, and start)
+sudo make deploy
 
-# Enable and start service
+# Or step by step:
+sudo make install
 sudo systemctl enable capi
 sudo systemctl start capi
 
@@ -76,6 +76,8 @@ sudo systemctl status capi
 # View logs
 sudo journalctl -u capi -f
 ```
+
+The service runs as the system user `capi`. Udev rules in `99-cec.rules` grant the `capi` group access to Pulse-Eight CEC adapters.
 
 ## Usage
 

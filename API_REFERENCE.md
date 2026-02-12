@@ -2,6 +2,8 @@
 
 Complete HTTP API reference for CEC HTTP Bridge.
 
+**OpenAPI:** An [OpenAPI 3.0](https://spec.openapis.org/oas/v3.0.3) specification is available as [`openapi.yaml`](openapi.yaml) in the project root. Use it with Swagger UI, Redoc, or code generators.
+
 ## Base URL
 
 ```

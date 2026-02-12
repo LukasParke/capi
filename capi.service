@@ -1,19 +1,21 @@
 [Unit]
 Description=CEC HTTP Bridge Service
 Documentation=https://github.com/LukasParke/capi
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-Group=pi
+User=capi
+Group=capi
+SupplementaryGroups=dialout
 WorkingDirectory=/opt/capi
 
 # Main service command
 ExecStart=/opt/capi/capi -bind :8080 -name "CEC HTTP Bridge"
 
 # Restart policy
-Restart=always
+Restart=on-failure
 RestartSec=10
 
 # Security settings

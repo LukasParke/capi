@@ -2,6 +2,7 @@ package cec
 
 /*
 #cgo pkg-config: libcec
+#cgo LDFLAGS: -Wl,--no-as-needed -lstdc++ -Wl,--as-needed
 #include <libcec/cecc.h>
 #include <stdlib.h>
 
@@ -473,6 +474,34 @@ func (c *Connection) GetCurrentConfiguration() (*Configuration, error) {
 	}
 
 	return config, nil
+}
+
+// GetAudioStatus returns the current audio status from the audio system.
+// Returns volume level (0-100) and muted state.
+func (c *Connection) GetAudioStatus() (volume uint8, muted bool, err error) {
+	status := C.libcec_audio_get_status(c.handle)
+	// Return value is a uint8: bit 7 = muted, bits 0-6 = volume percentage.
+	// A return of 0 with no audio system present is indistinguishable from
+	// "volume 0, not muted", so we just return what libcec gives us.
+	muted = (status & 0x80) != 0
+	volume = uint8(status & 0x7F)
+	return volume, muted, nil
+}
+
+// PollDevice sends a POLL message to check if a device is present on the bus.
+// This is much faster than GetDeviceInfo for a simple presence check.
+func (c *Connection) PollDevice(address LogicalAddress) bool {
+	return C.libcec_poll_device(c.handle, C.cec_logical_address(address)) == 1
+}
+
+// SetHDMIPort tells libcec to switch input on the base device to the given
+// HDMI port. baseDevice is typically LogicalAddressTV (0). This uses libcec's
+// built-in protocol handling which is more reliable than raw commands.
+func (c *Connection) SetHDMIPort(baseDevice LogicalAddress, port uint8) error {
+	if C.libcec_set_hdmi_port(c.handle, C.cec_logical_address(baseDevice), C.uint8_t(port)) == 0 {
+		return errors.New("failed to set HDMI port")
+	}
+	return nil
 }
 
 // RescanDevices rescans for devices
