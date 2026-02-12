@@ -70,7 +70,7 @@ capi/
 
 ## Technology Stack
 
-- **Language:** Go 1.21+
+- **Language:** Go 1.25+
 - **Core Library:** libcec 6.0+
 - **HTTP Router:** gorilla/mux
 - **Interface:** cgo for C library bindings
@@ -211,7 +211,7 @@ Comprehensive error handling throughout:
 - Ubuntu 20.04+ / Debian 11+
 - Raspberry Pi OS
 - libcec 6.0+ (4.0+ may work)
-- Go 1.21+
+- Go 1.25+
 
 ## Development
 

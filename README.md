@@ -42,7 +42,7 @@ On the Pi (Raspberry Pi OS / Debian / Ubuntu):
 sudo apt-get update
 sudo apt-get install -y libcec-dev libcec6 cec-utils pkg-config
 
-# Install Go 1.21+ (Raspberry Pi OS: sudo apt-get install -y golang-go, or from https://go.dev/dl/ — linux/arm64 or armv6l)
+# Install Go 1.25+ (Raspberry Pi OS: sudo apt-get install -y golang-go, or from https://go.dev/dl/ — linux/arm64 or armv6l)
 ```
 
 Or run `sudo make setup` to install the above (except Go, which you may install separately).

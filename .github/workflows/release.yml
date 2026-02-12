@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -37,7 +37,9 @@ jobs:
             arm64v8/debian:bookworm bash -c '
               set -e
               apt-get update && apt-get install -y --no-install-recommends \
-                golang pkg-config libcec-dev ca-certificates
+                gcc libc6-dev curl pkg-config libcec-dev ca-certificates
+              curl -sL https://go.dev/dl/go1.25.2.linux-arm64.tar.gz | tar -C /usr/local -xz
+              export PATH=$PATH:/usr/local/go/bin
               export CGO_ENABLED=1
               export CGO_LDFLAGS="-Wl,--no-as-needed -lstdc++ -Wl,--as-needed"
               go build -ldflags "-X main.version=${VERSION} -s -w" -o capi-linux-arm64 ./capi
@@ -53,7 +55,9 @@ jobs:
             arm32v6/debian:bookworm bash -c '
               set -e
               apt-get update && apt-get install -y --no-install-recommends \
-                golang pkg-config libcec-dev ca-certificates
+                gcc libc6-dev curl pkg-config libcec-dev ca-certificates
+              curl -sL https://go.dev/dl/go1.25.2.linux-armv6l.tar.gz | tar -C /usr/local -xz
+              export PATH=$PATH:/usr/local/go/bin
               export CGO_ENABLED=1
               export CGO_LDFLAGS="-Wl,--no-as-needed -lstdc++ -Wl,--as-needed"
               go build -ldflags "-X main.version=${VERSION} -s -w" -o capi-linux-armv6 ./capi
