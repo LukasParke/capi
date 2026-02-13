@@ -4,9 +4,9 @@ info:
   description: |
     REST API for controlling HDMI-CEC devices. Use this API to power on/off
     TVs and devices, control volume, switch inputs (HDMI ports), send remote
-    key presses, and send raw CEC commands. Intended for home automation,
-    media centers, and scripting.
-  version: 1.0.0
+    key presses, send raw CEC commands, and manage MQTT settings. Intended
+    for home automation, media centers, and scripting.
+  version: 1.1.0
   license:
     name: MIT
     url: https://opensource.org/licenses/MIT
@@ -34,7 +34,9 @@ tags:
   - name: Raw
     description: Raw CEC commands
   - name: System
-    description: Logs and health
+    description: Topology, audio status, logs, health, events, and updates
+  - name: Settings
+    description: MQTT and service configuration
 
 paths:
   /devices:
@@ -67,6 +69,8 @@ paths:
                   - logical_address: 0
                     address_name: TV
                     physical_address: 0.0.0.0
+                    device_type: TV
+                    hdmi_port: 0
                     vendor_id: "0x0000F0"
                     vendor_name: Samsung
                     cec_version: "1.4"
@@ -216,7 +220,7 @@ paths:
     post:
       tags: [Volume]
       summary: Volume up
-      description: Increase system volume by one step.
+      description: Increase system volume by one step (audio system).
       operationId: volumeUp
       responses:
         '200':
@@ -228,11 +232,31 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /volume/up/{address}:
+    post:
+      tags: [Volume]
+      summary: Volume up to specific device
+      description: Send volume up key press to a specific device by logical address.
+      operationId: volumeUpAddress
+      parameters:
+        - $ref: '#/components/parameters/LogicalAddress'
+      responses:
+        '200':
+          description: Volume up sent to device
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /volume/down:
     post:
       tags: [Volume]
       summary: Volume down
-      description: Decrease system volume by one step.
+      description: Decrease system volume by one step (audio system).
       operationId: volumeDown
       responses:
         '200':
@@ -244,11 +268,31 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /volume/down/{address}:
+    post:
+      tags: [Volume]
+      summary: Volume down to specific device
+      description: Send volume down key press to a specific device by logical address.
+      operationId: volumeDownAddress
+      parameters:
+        - $ref: '#/components/parameters/LogicalAddress'
+      responses:
+        '200':
+          description: Volume down sent to device
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /volume/mute:
     post:
       tags: [Volume]
       summary: Toggle mute
-      description: Toggle audio mute.
+      description: Toggle audio mute (audio system).
       operationId: volumeMute
       responses:
         '200':
@@ -257,6 +301,26 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /volume/mute/{address}:
+    post:
+      tags: [Volume]
+      summary: Toggle mute on specific device
+      description: Send mute key press to a specific device by logical address.
+      operationId: volumeMuteAddress
+      parameters:
+        - $ref: '#/components/parameters/LogicalAddress'
+      responses:
+        '200':
+          description: Mute sent to device
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -308,17 +372,17 @@ paths:
     post:
       tags: [Source]
       summary: Switch to HDMI port
-      description: Switch TV input to a specific HDMI port (1-4).
+      description: Switch TV input to a specific HDMI port (1-15).
       operationId: setHDMIPort
       parameters:
         - name: port
           in: path
           required: true
-          description: HDMI port number (1-4)
+          description: HDMI port number (1-15)
           schema:
             type: integer
             minimum: 1
-            maximum: 4
+            maximum: 15
       responses:
         '200':
           description: Switched to HDMI port
@@ -400,11 +464,63 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /topology:
+    get:
+      tags: [System]
+      summary: Get CEC bus topology
+      description: |
+        Get the CEC bus topology including own logical addresses, own HDMI port,
+        known port count, and active ports with their connected devices.
+      operationId: getTopology
+      responses:
+        '200':
+          description: Bus topology retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                status: success
+                message: Bus topology retrieved
+                data:
+                  own_addresses: [1]
+                  own_port: 1
+                  known_port_count: 3
+                  active_ports:
+                    - port: 1
+                      devices: ["CEC Bridge"]
+                    - port: 2
+                      devices: ["Fire TV"]
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /audio/status:
+    get:
+      tags: [System]
+      summary: Get audio status
+      description: Get the current volume level and mute state from the audio system.
+      operationId: getAudioStatus
+      responses:
+        '200':
+          description: Audio status retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                status: success
+                message: Audio status retrieved
+                data:
+                  volume: 45
+                  muted: false
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /logs:
     get:
       tags: [System]
       summary: Get recent logs
-      description: Get recent CEC log messages (traffic, notices, errors).
+      description: Get recent CEC log messages (traffic, notices, errors). Up to 100 most recent entries.
       operationId: getLogs
       responses:
         '200':
@@ -418,8 +534,30 @@ paths:
                 message: Logs retrieved
                 data:
                   - level: NOTICE
-                    timestamp: "2024-02-08T10:30:45Z"
+                    timestamp: "2026-02-12T10:30:45Z"
                     message: CEC connection opened
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /events:
+    get:
+      tags: [System]
+      summary: Server-Sent Events stream
+      description: |
+        Real-time stream of CEC bus events using Server-Sent Events (SSE).
+        Events are JSON objects with `type`, `timestamp`, and `data` fields.
+        Event types: `power_change`, `source_activated`, `key_press`, `command`, `alert`.
+        Sends a keepalive comment every 15 seconds.
+      operationId: getEvents
+      responses:
+        '200':
+          description: SSE event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: |
+                data: {"type":"power_change","timestamp":"2026-02-12T10:30:45Z","data":{"address":0,"status":"on"}}
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -427,7 +565,7 @@ paths:
     get:
       tags: [System]
       summary: Health check
-      description: Service health and libcec version information.
+      description: Service health, version, and libcec version information.
       operationId: getHealth
       responses:
         '200':
@@ -440,8 +578,112 @@ paths:
                 status: success
                 message: Service is healthy
                 data:
-                  version: "1.0.0"
+                  version: v20260212.143000-abc1234
                   libcec: "libCEC version 6.0.2"
+
+  /update:
+    post:
+      tags: [System]
+      summary: Trigger self-update
+      description: |
+        Check for a new release on GitHub and install it. Downloads the new
+        binary and web UI, then restarts the systemd service. Returns the
+        old and new version on success. If already up to date, returns the
+        current version.
+      operationId: triggerUpdate
+      responses:
+        '200':
+          description: Update check completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              examples:
+                updated:
+                  summary: Update installed
+                  value:
+                    status: success
+                    message: "Updated to v20260212.150000-def5678, restarting..."
+                    data:
+                      old_version: v20260212.143000-abc1234
+                      new_version: v20260212.150000-def5678
+                upToDate:
+                  summary: Already up to date
+                  value:
+                    status: success
+                    message: Already up to date
+                    data:
+                      version: v20260212.143000-abc1234
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          description: GitHub API unreachable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+
+  /settings/mqtt:
+    get:
+      tags: [Settings]
+      summary: Get MQTT settings
+      description: |
+        Get the current MQTT broker configuration and connection status.
+        The password is masked as `"***"` if set, or `""` if empty.
+      operationId: getMQTTSettings
+      responses:
+        '200':
+          description: MQTT settings retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                status: success
+                message: MQTT settings
+                data:
+                  broker: "tcp://localhost:1883"
+                  user: ha
+                  pass: "***"
+                  prefix: capi
+                  connected: true
+    post:
+      tags: [Settings]
+      summary: Update MQTT settings
+      description: |
+        Update the MQTT broker configuration. Settings are persisted to
+        `config.json` next to the binary. If a broker URL is provided, the
+        service connects (or reconnects) to the broker. If the broker is
+        empty, MQTT is disabled and disconnected.
+
+        To keep the existing password without changing it, send `"***"` as
+        the password value.
+      operationId: postMQTTSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MQTTSettingsRequest'
+            example:
+              broker: "tcp://localhost:1883"
+              user: ha
+              pass: secret
+              prefix: capi
+      responses:
+        '200':
+          description: MQTT settings saved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                status: success
+                message: MQTT settings saved
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
 
 components:
   parameters:
@@ -483,6 +725,14 @@ components:
         physical_address:
           type: string
           example: "0.0.0.0"
+        device_type:
+          type: string
+          description: CEC device type
+          example: TV
+        hdmi_port:
+          type: integer
+          description: HDMI port number derived from physical address (0 if not applicable)
+          example: 1
         vendor_id:
           type: string
           example: "0x0000F0"
@@ -501,6 +751,88 @@ components:
           type: boolean
         is_active_source:
           type: boolean
+
+    TopologyResponse:
+      type: object
+      properties:
+        own_addresses:
+          type: array
+          items:
+            type: integer
+          description: Logical addresses owned by this adapter
+        own_port:
+          type: integer
+          description: HDMI port this adapter is connected to
+        known_port_count:
+          type: integer
+          description: Number of known HDMI ports on the TV
+        active_ports:
+          type: array
+          items:
+            $ref: '#/components/schemas/PortDetail'
+
+    PortDetail:
+      type: object
+      properties:
+        port:
+          type: integer
+          description: HDMI port number
+        devices:
+          type: array
+          items:
+            type: string
+          description: OSD names of devices on this port
+
+    AudioStatus:
+      type: object
+      properties:
+        volume:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Volume level percentage
+        muted:
+          type: boolean
+          description: Whether audio is muted
+
+    MQTTSettingsResponse:
+      type: object
+      properties:
+        broker:
+          type: string
+          description: MQTT broker URL
+          example: "tcp://localhost:1883"
+        user:
+          type: string
+          description: MQTT username
+        pass:
+          type: string
+          description: Masked password ("***" if set, "" if empty)
+        prefix:
+          type: string
+          description: MQTT topic prefix
+          example: capi
+        connected:
+          type: boolean
+          description: Whether the MQTT client is currently connected
+
+    MQTTSettingsRequest:
+      type: object
+      properties:
+        broker:
+          type: string
+          description: MQTT broker URL (empty to disable MQTT)
+          example: "tcp://localhost:1883"
+        user:
+          type: string
+          description: MQTT username (optional)
+        pass:
+          type: string
+          description: MQTT password (send "***" to keep existing password)
+        prefix:
+          type: string
+          description: MQTT topic prefix (defaults to "capi" if empty)
+          example: capi
 
     KeyRequest:
       type: object

@@ -147,13 +147,30 @@
     }
 
     select,
-    input[type=number] {
+    input[type=number],
+    input[type=text],
+    input[type=password] {
       background: var(--card);
       color: var(--text);
       border: 1px solid rgba(255, 255, 255, .1);
       border-radius: var(--radius);
       padding: 6px 10px;
       font-size: .85rem;
+      width: 100%;
+    }
+
+    select,
+    input[type=number] {
+      width: auto;
+    }
+
+    .form-group {
+      margin-bottom: 10px;
+    }
+
+    .form-group label {
+      display: block;
+      margin-bottom: 3px;
     }
 
     label {
@@ -427,6 +444,33 @@
         <button onclick="sendKey('stop')">&#9632;</button>
       </div>
       <div id="nav-result" class="result"></div>
+    </div>
+
+    <!-- MQTT Settings -->
+    <div class="card full">
+      <h2>MQTT Settings <span id="mqtt-badge" class="badge off" style="font-size:.7rem;margin-left:6px">Not configured</span></h2>
+      <div style="display:grid;gap:var(--gap);grid-template-columns:1fr 1fr">
+        <div class="form-group">
+          <label>Broker URL</label>
+          <input type="text" id="mqtt-broker" placeholder="tcp://localhost:1883">
+        </div>
+        <div class="form-group">
+          <label>Topic Prefix</label>
+          <input type="text" id="mqtt-prefix" placeholder="capi">
+        </div>
+        <div class="form-group">
+          <label>Username</label>
+          <input type="text" id="mqtt-user" placeholder="(optional)">
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <input type="password" id="mqtt-pass" placeholder="(optional)">
+        </div>
+      </div>
+      <div class="btn-row" style="margin-top:8px">
+        <button onclick="saveMQTTSettings()">Save</button>
+        <button class="sm" onclick="loadMQTTSettings()">Refresh</button>
+      </div>
     </div>
 
     <!-- Logs -->
@@ -915,11 +959,77 @@
       }).catch(function (e) { box.textContent = 'Error: ' + e; });
     }
 
+    /* ── MQTT Settings ───────────────────────────────────── */
+    var mqttPassSentinel = false; // true when password field holds the masked value
+
+    function loadMQTTSettings() {
+      fetch('/api/settings/mqtt').then(function (r) { return r.json(); }).then(function (j) {
+        if (j.status === 'success' && j.data) {
+          var d = j.data;
+          qs('#mqtt-broker').value = d.broker || '';
+          qs('#mqtt-user').value = d.user || '';
+          qs('#mqtt-prefix').value = d.prefix || '';
+          // Password: show placeholder if a password is saved
+          var passEl = qs('#mqtt-pass');
+          if (d.pass === '***') {
+            passEl.value = '';
+            passEl.placeholder = '(saved - leave blank to keep)';
+            mqttPassSentinel = true;
+          } else {
+            passEl.value = '';
+            passEl.placeholder = '(optional)';
+            mqttPassSentinel = false;
+          }
+          updateMQTTBadge(d);
+        }
+      }).catch(function () { /* ignore */ });
+    }
+
+    function updateMQTTBadge(d) {
+      var badge = qs('#mqtt-badge');
+      if (!d.broker) {
+        badge.textContent = 'Not configured';
+        badge.className = 'badge off';
+      } else if (d.connected) {
+        badge.textContent = 'Connected';
+        badge.className = 'badge';
+      } else {
+        badge.textContent = 'Disconnected';
+        badge.className = 'badge err';
+      }
+    }
+
+    function saveMQTTSettings() {
+      var passVal = qs('#mqtt-pass').value;
+      // If the user didn't touch the password and one is already saved, send sentinel
+      if (passVal === '' && mqttPassSentinel) {
+        passVal = '***';
+      }
+      var body = {
+        broker: qs('#mqtt-broker').value.trim(),
+        user: qs('#mqtt-user').value.trim(),
+        pass: passVal,
+        prefix: qs('#mqtt-prefix').value.trim() || 'capi'
+      };
+      fetch('/api/settings/mqtt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      }).then(function (r) { return r.json(); }).then(function (j) {
+        toast(j.message, j.status === 'success');
+        // Re-fetch to update badge and sentinel state
+        setTimeout(loadMQTTSettings, 500);
+      }).catch(function (e) {
+        toast('Error: ' + e, false);
+      });
+    }
+
     /* ── Init ─────────────────────────────────────────────── */
     checkHealth();
     connectSSE();
     refreshTopology();
     refreshDevices(false);
+    loadMQTTSettings();
   </script>
 </body>
 

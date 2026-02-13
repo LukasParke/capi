@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -22,6 +21,7 @@ import (
 
 	"capi/cec"
 
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/gorilla/mux"
 )
 
@@ -847,6 +847,361 @@ func getAudioStatusHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ── Configuration persistence ──────────────────────────────────────────
+
+// MQTTConfig holds MQTT broker connection settings.
+type MQTTConfig struct {
+	Broker string `json:"broker"`
+	User   string `json:"user"`
+	Pass   string `json:"pass"`
+	Prefix string `json:"prefix"`
+}
+
+// Config is the on-disk configuration file format.
+type Config struct {
+	MQTT MQTTConfig `json:"mqtt"`
+}
+
+var (
+	currentConfig  Config
+	configMu       sync.RWMutex
+	configFilePath string
+)
+
+// loadConfig reads and parses the config file. Returns zero Config if not found.
+func loadConfig(path string) Config {
+	var cfg Config
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cfg
+	}
+	_ = json.Unmarshal(data, &cfg)
+	return cfg
+}
+
+// saveConfig atomically writes the config file.
+func saveConfig(path string, cfg Config) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// ── MQTT bridge ────────────────────────────────────────────────────────
+
+var (
+	mqttClient mqtt.Client
+	mqttMu     sync.Mutex
+	mqttCancel context.CancelFunc
+)
+
+// stopMQTT disconnects the MQTT client and cancels the event-forwarding goroutine.
+func stopMQTT() {
+	mqttMu.Lock()
+	defer mqttMu.Unlock()
+	if mqttCancel != nil {
+		mqttCancel()
+		mqttCancel = nil
+	}
+	if mqttClient != nil && mqttClient.IsConnected() {
+		mqttClient.Disconnect(1000)
+		log.Println("[MQTT] Disconnected")
+	}
+	mqttClient = nil
+}
+
+// startMQTT connects to the broker, subscribes to command topics, and
+// forwards EventHub events to MQTT publish topics. Safe to call multiple
+// times; previous connections are torn down first.
+func startMQTT(broker, user, pass, prefix string) {
+	stopMQTT()
+
+	host, _ := os.Hostname()
+	opts := mqtt.NewClientOptions().
+		AddBroker(broker).
+		SetClientID(fmt.Sprintf("capi-%s-%d", host, os.Getpid())).
+		SetAutoReconnect(true).
+		SetConnectRetry(true).
+		SetConnectRetryInterval(10 * time.Second).
+		SetOnConnectHandler(func(c mqtt.Client) {
+			log.Printf("[MQTT] Connected to %s", broker)
+			cmdTopic := prefix + "/command/#"
+			token := c.Subscribe(cmdTopic, 1, func(_ mqtt.Client, msg mqtt.Message) {
+				handleMQTTCommand(prefix, msg.Topic(), msg.Payload())
+			})
+			if token.Wait() && token.Error() != nil {
+				log.Printf("[MQTT] Subscribe failed: %v", token.Error())
+			} else {
+				log.Printf("[MQTT] Subscribed to %s", cmdTopic)
+			}
+		}).
+		SetConnectionLostHandler(func(_ mqtt.Client, err error) {
+			log.Printf("[MQTT] Connection lost: %v", err)
+		})
+
+	if user != "" {
+		opts.SetUsername(user)
+	}
+	if pass != "" {
+		opts.SetPassword(pass)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	mqttMu.Lock()
+	mqttCancel = cancel
+	mqttClient = mqtt.NewClient(opts)
+	client := mqttClient
+	mqttMu.Unlock()
+
+	if token := client.Connect(); token.Wait() && token.Error() != nil {
+		log.Printf("[MQTT] Initial connection failed (will retry): %v", token.Error())
+	}
+
+	// Goroutine: forward EventHub events to MQTT
+	go func() {
+		ch := eventHub.Subscribe()
+		defer eventHub.Unsubscribe(ch)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-ch:
+				if !ok {
+					return
+				}
+				mqttMu.Lock()
+				c := mqttClient
+				mqttMu.Unlock()
+				if c == nil || !c.IsConnected() {
+					continue
+				}
+				topic := prefix + "/event/" + ev.Type
+				payload, err := json.Marshal(ev.Data)
+				if err != nil {
+					continue
+				}
+				c.Publish(topic, 0, false, payload)
+			}
+		}
+	}()
+}
+
+// handleMQTTCommand dispatches an incoming MQTT message to the appropriate
+// CEC operation. Topic format: {prefix}/command/{action}[/{param}]
+func handleMQTTCommand(prefix, topic string, payload []byte) {
+	cmdPath := strings.TrimPrefix(topic, prefix+"/command/")
+
+	switch {
+	case cmdPath == "power/on":
+		addr := parseMQTTAddress(payload, 0)
+		if addr < 0 || addr > 15 {
+			log.Printf("[MQTT] power/on: invalid address %q", string(payload))
+			return
+		}
+		cecMutex.Lock()
+		err := cecConn.PowerOn(cec.LogicalAddress(addr))
+		cecMutex.Unlock()
+		if err != nil {
+			log.Printf("[MQTT] power/on failed: %v", err)
+		}
+
+	case cmdPath == "power/off":
+		addr := parseMQTTAddress(payload, 0)
+		if addr < 0 || addr > 15 {
+			log.Printf("[MQTT] power/off: invalid address %q", string(payload))
+			return
+		}
+		cecMutex.Lock()
+		err := cecConn.Standby(cec.LogicalAddress(addr))
+		cecMutex.Unlock()
+		if err != nil {
+			log.Printf("[MQTT] power/off failed: %v", err)
+		}
+
+	case cmdPath == "volume/up":
+		cecMutex.Lock()
+		err := cecConn.VolumeUp(true)
+		cecMutex.Unlock()
+		if err != nil {
+			log.Printf("[MQTT] volume/up failed: %v", err)
+		}
+
+	case cmdPath == "volume/down":
+		cecMutex.Lock()
+		err := cecConn.VolumeDown(true)
+		cecMutex.Unlock()
+		if err != nil {
+			log.Printf("[MQTT] volume/down failed: %v", err)
+		}
+
+	case cmdPath == "volume/mute":
+		cecMutex.Lock()
+		err := cecConn.AudioToggleMute()
+		cecMutex.Unlock()
+		if err != nil {
+			log.Printf("[MQTT] volume/mute failed: %v", err)
+		}
+
+	case cmdPath == "source":
+		addr := parseMQTTAddress(payload, -1)
+		if addr < 0 || addr > 15 {
+			log.Printf("[MQTT] source: invalid address %q", string(payload))
+			return
+		}
+		cecMutex.Lock()
+		err := cecConn.SwitchToDevice(cec.LogicalAddress(addr))
+		cecMutex.Unlock()
+		if err != nil {
+			log.Printf("[MQTT] source failed: %v", err)
+		}
+
+	case cmdPath == "hdmi":
+		port := parseMQTTAddress(payload, -1)
+		if port < 1 || port > 15 {
+			log.Printf("[MQTT] hdmi: invalid port %q", string(payload))
+			return
+		}
+		cecMutex.Lock()
+		err := cecConn.SwitchToHDMIPort(uint8(port))
+		cecMutex.Unlock()
+		if err != nil {
+			log.Printf("[MQTT] hdmi failed: %v", err)
+		}
+
+	case cmdPath == "key":
+		var req struct {
+			Address int    `json:"address"`
+			Key     string `json:"key"`
+			Keycode int    `json:"keycode"`
+		}
+		if err := json.Unmarshal(payload, &req); err != nil {
+			log.Printf("[MQTT] key: invalid payload: %v", err)
+			return
+		}
+		if req.Address < 0 || req.Address > 15 {
+			log.Printf("[MQTT] key: invalid address %d", req.Address)
+			return
+		}
+		keyMap := map[string]cec.Keycode{
+			"up": cec.KeycodeUp, "down": cec.KeycodeDown,
+			"left": cec.KeycodeLeft, "right": cec.KeycodeRight,
+			"select": cec.KeycodeSelect, "enter": cec.KeycodeEnter,
+			"back": cec.KeycodeExit, "home": cec.KeycodeRootMenu,
+			"menu": cec.KeycodeSetupMenu, "play": cec.KeycodePlay,
+			"pause": cec.KeycodePause, "stop": cec.KeycodeStop,
+		}
+		var keycode cec.Keycode
+		if req.Key != "" {
+			k, ok := keyMap[req.Key]
+			if !ok {
+				log.Printf("[MQTT] key: unknown key name %q", req.Key)
+				return
+			}
+			keycode = k
+		} else {
+			keycode = cec.Keycode(req.Keycode)
+		}
+		cecMutex.Lock()
+		err := cecConn.SendButton(cec.LogicalAddress(req.Address), keycode)
+		cecMutex.Unlock()
+		if err != nil {
+			log.Printf("[MQTT] key failed: %v", err)
+		}
+
+	default:
+		log.Printf("[MQTT] Unknown command topic: %s", topic)
+	}
+}
+
+// parseMQTTAddress parses a simple integer from the payload (trimmed).
+// Returns defaultVal if the payload is empty or not a valid integer.
+func parseMQTTAddress(payload []byte, defaultVal int) int {
+	s := strings.TrimSpace(string(payload))
+	if s == "" {
+		return defaultVal
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil {
+		return defaultVal
+	}
+	return v
+}
+
+// ── MQTT settings API ──────────────────────────────────────────────────
+
+func getMQTTSettingsHandler(w http.ResponseWriter, r *http.Request) {
+	configMu.RLock()
+	cfg := currentConfig.MQTT
+	configMu.RUnlock()
+
+	maskedPass := ""
+	if cfg.Pass != "" {
+		maskedPass = "***"
+	}
+
+	mqttMu.Lock()
+	connected := mqttClient != nil && mqttClient.IsConnected()
+	mqttMu.Unlock()
+
+	respondSuccess(w, "MQTT settings", map[string]interface{}{
+		"broker":    cfg.Broker,
+		"user":      cfg.User,
+		"pass":      maskedPass,
+		"prefix":    cfg.Prefix,
+		"connected": connected,
+	})
+}
+
+func postMQTTSettingsHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Broker string `json:"broker"`
+		User   string `json:"user"`
+		Pass   string `json:"pass"`
+		Prefix string `json:"prefix"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.Prefix == "" {
+		req.Prefix = "capi"
+	}
+
+	configMu.Lock()
+	// Sentinel "***" means keep existing password
+	if req.Pass == "***" {
+		req.Pass = currentConfig.MQTT.Pass
+	}
+	currentConfig.MQTT = MQTTConfig{
+		Broker: req.Broker,
+		User:   req.User,
+		Pass:   req.Pass,
+		Prefix: req.Prefix,
+	}
+	cfg := currentConfig
+	configMu.Unlock()
+
+	if err := saveConfig(configFilePath, cfg); err != nil {
+		log.Printf("Failed to save config: %v", err)
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to save config: %v", err))
+		return
+	}
+
+	if req.Broker != "" {
+		startMQTT(req.Broker, req.User, req.Pass, req.Prefix)
+	} else {
+		stopMQTT()
+	}
+
+	respondSuccess(w, "MQTT settings saved", nil)
+}
+
 // ── Self-update logic ──────────────────────────────────────────────────
 
 const updateRepo = "LukasParke/capi"
@@ -1073,6 +1428,10 @@ func main() {
 	adapterPath := flag.String("adapter", "", "CEC adapter path (auto-detect if empty)")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	doUpdate := flag.Bool("update", false, "Check for updates and install the latest release")
+	mqttBroker := flag.String("mqtt-broker", "", "MQTT broker URL (e.g. tcp://localhost:1883). Empty disables MQTT.")
+	mqttUser := flag.String("mqtt-user", "", "MQTT username (optional)")
+	mqttPass := flag.String("mqtt-pass", "", "MQTT password (optional)")
+	mqttPrefix := flag.String("mqtt-prefix", "capi", "MQTT topic prefix")
 	flag.Parse()
 
 	if *showVersion {
@@ -1083,6 +1442,30 @@ func main() {
 	if *doUpdate {
 		doSelfUpdate()
 		return
+	}
+
+	// Determine config file path (next to the binary)
+	exe, _ := os.Executable()
+	configFilePath = filepath.Join(filepath.Dir(exe), "config.json")
+
+	// Load persisted config; CLI flags override config file values
+	currentConfig = loadConfig(configFilePath)
+	if *mqttBroker != "" {
+		currentConfig.MQTT.Broker = *mqttBroker
+	}
+	if *mqttUser != "" {
+		currentConfig.MQTT.User = *mqttUser
+	}
+	if *mqttPass != "" {
+		currentConfig.MQTT.Pass = *mqttPass
+	}
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "mqtt-prefix" {
+			currentConfig.MQTT.Prefix = *mqttPrefix
+		}
+	})
+	if currentConfig.MQTT.Prefix == "" {
+		currentConfig.MQTT.Prefix = "capi"
 	}
 
 	// Initialize CEC
@@ -1126,6 +1509,11 @@ func main() {
 	// Wait for CEC to initialize
 	time.Sleep(2 * time.Second)
 
+	// Start MQTT bridge if configured (from config file or CLI flags)
+	if currentConfig.MQTT.Broker != "" {
+		startMQTT(currentConfig.MQTT.Broker, currentConfig.MQTT.User, currentConfig.MQTT.Pass, currentConfig.MQTT.Prefix)
+	}
+
 	// Set up HTTP router
 	r := mux.NewRouter()
 
@@ -1133,7 +1521,7 @@ func main() {
 	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		exe, _ := os.Executable()
 		htmlPath := filepath.Join(filepath.Dir(exe), "index.html")
-		data, err := ioutil.ReadFile(htmlPath)
+		data, err := os.ReadFile(htmlPath)
 		if err != nil {
 			http.Error(w, "UI not found", http.StatusNotFound)
 			return
@@ -1191,6 +1579,10 @@ func main() {
 	// Self-update
 	r.HandleFunc("/api/update", updateHandler).Methods("POST")
 
+	// MQTT settings
+	r.HandleFunc("/api/settings/mqtt", getMQTTSettingsHandler).Methods("GET")
+	r.HandleFunc("/api/settings/mqtt", postMQTTSettingsHandler).Methods("POST")
+
 	// Start server with graceful shutdown (signal.Notify works on Go 1.15+)
 	server := &http.Server{Addr: *bindAddr, Handler: r}
 	sigChan := make(chan os.Signal, 1)
@@ -1206,6 +1598,7 @@ func main() {
 
 	<-sigChan
 	log.Println("Shutting down...")
+	stopMQTT()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {

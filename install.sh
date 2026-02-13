@@ -22,6 +22,22 @@ asset_url() {
   echo "$RELEASE_JSON" | grep "browser_download_url.*/$1\"" | head -1 | cut -d '"' -f 4
 }
 
+# Helper: download a file with retries, HTTP error detection, and diagnostics.
+download() {
+  local url="$1" dest="$2" label="$3"
+  echo "Downloading ${label}..."
+  if ! curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 300 "$url" -o "$dest"; then
+    echo ""
+    echo "ERROR: Failed to download ${label}."
+    echo "  URL:  $url"
+    echo "  Dest: $dest"
+    echo "  Disk: $(df -h /opt/capi | awk 'NR==2 {print $4}') available"
+    echo ""
+    echo "Check your network connection and available disk space."
+    exit 1
+  fi
+}
+
 BINARY_URL=$(asset_url "$BINARY")
 if [ -z "$BINARY_URL" ]; then
   echo "ERROR: Could not find download URL for $BINARY in latest release."
@@ -33,19 +49,31 @@ echo "Binary URL: $BINARY_URL"
 
 # ── Install runtime dependencies ──────────────────────────────────────
 echo "Installing runtime dependencies..."
-apt-get update && apt-get install -y libcec6 cec-utils
+apt-get update && apt-get install -y libcec6 cec-utils && apt-get clean
+
+# ── Stop existing service if running ──────────────────────────────────
+if systemctl is-active --quiet capi.service 2>/dev/null; then
+  echo "Stopping existing capi service..."
+  systemctl stop capi.service
+fi
 
 # ── Download binary ───────────────────────────────────────────────────
 mkdir -p /opt/capi
-echo "Downloading $BINARY..."
-curl -sSL --connect-timeout 10 --max-time 120 "$BINARY_URL" -o /opt/capi/capi
+
+AVAIL_KB=$(df /opt/capi | awk 'NR==2 {print $4}')
+if [ "$AVAIL_KB" -lt 51200 ]; then
+  echo "ERROR: Not enough disk space on /opt (${AVAIL_KB} KB available, need ~50 MB)."
+  echo "Free up space and try again."
+  exit 1
+fi
+
+download "$BINARY_URL" /opt/capi/capi "$BINARY"
 chmod +x /opt/capi/capi
 
 # ── Download support files from release ───────────────────────────────
-echo "Downloading support files..."
-curl -sSL --connect-timeout 10 --max-time 30 "$(asset_url capi.service)" -o /etc/systemd/system/capi.service
-curl -sSL --connect-timeout 10 --max-time 30 "$(asset_url 99-cec.rules)" -o /etc/udev/rules.d/99-cec.rules
-curl -sSL --connect-timeout 10 --max-time 30 "$(asset_url index.html)"   -o /opt/capi/index.html
+download "$(asset_url capi.service)" /etc/systemd/system/capi.service "capi.service"
+download "$(asset_url 99-cec.rules)" /etc/udev/rules.d/99-cec.rules "99-cec.rules"
+download "$(asset_url index.html)"   /opt/capi/index.html "index.html"
 
 # ── Create service user ───────────────────────────────────────────────
 id -u capi &>/dev/null || useradd --system --user-group --no-create-home --shell /usr/sbin/nologin capi
