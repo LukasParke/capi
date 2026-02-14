@@ -17,6 +17,33 @@ echo "Fetching latest release info..."
 RELEASE_JSON=$(curl -sSL --connect-timeout 10 --max-time 30 \
   "https://api.github.com/repos/$REPO/releases/latest")
 
+REMOTE_VERSION=$(echo "$RELEASE_JSON" | grep '"tag_name"' | head -1 | cut -d '"' -f 4)
+if [ -z "$REMOTE_VERSION" ]; then
+  echo "ERROR: Could not determine latest release version."
+  exit 1
+fi
+
+echo "Latest release: $REMOTE_VERSION"
+
+# ── Check for existing installation ───────────────────────────────────
+LOCAL_VERSION=""
+if [ -x /opt/capi/capi ]; then
+  LOCAL_VERSION=$(/opt/capi/capi -version 2>/dev/null || true)
+fi
+
+if [ -n "$LOCAL_VERSION" ]; then
+  echo "Installed version: $LOCAL_VERSION"
+  if [ "$LOCAL_VERSION" = "$REMOTE_VERSION" ]; then
+    echo "Already up to date ($LOCAL_VERSION). Nothing to do."
+    exit 0
+  fi
+  echo "Update available: $LOCAL_VERSION -> $REMOTE_VERSION"
+  MODE="update"
+else
+  echo "No existing installation found. Performing fresh install."
+  MODE="install"
+fi
+
 # Helper: extract asset download URL by name from the release JSON.
 asset_url() {
   echo "$RELEASE_JSON" | grep "browser_download_url.*/$1\"" | head -1 | cut -d '"' -f 4
@@ -47,9 +74,11 @@ fi
 
 echo "Binary URL: $BINARY_URL"
 
-# ── Install runtime dependencies ──────────────────────────────────────
-echo "Installing runtime dependencies..."
-apt-get update && apt-get install -y libcec6 cec-utils && apt-get clean
+# ── Install runtime dependencies (fresh install only) ─────────────────
+if [ "$MODE" = "install" ]; then
+  echo "Installing runtime dependencies..."
+  apt-get update && apt-get install -y libcec6 cec-utils && apt-get clean
+fi
 
 # ── Stop existing service if running ──────────────────────────────────
 if systemctl is-active --quiet capi.service 2>/dev/null; then
@@ -75,8 +104,10 @@ download "$(asset_url capi.service)" /etc/systemd/system/capi.service "capi.serv
 download "$(asset_url 99-cec.rules)" /etc/udev/rules.d/99-cec.rules "99-cec.rules"
 download "$(asset_url index.html)"   /opt/capi/index.html "index.html"
 
-# ── Create service user ───────────────────────────────────────────────
-id -u capi &>/dev/null || useradd --system --user-group --no-create-home --shell /usr/sbin/nologin capi
+# ── Create service user (fresh install only) ──────────────────────────
+if [ "$MODE" = "install" ]; then
+  id -u capi &>/dev/null || useradd --system --user-group --no-create-home --shell /usr/sbin/nologin capi
+fi
 
 # ── Reload and start ──────────────────────────────────────────────────
 systemctl daemon-reload
@@ -85,5 +116,9 @@ systemctl enable capi.service
 systemctl restart capi.service
 
 echo ""
-echo "capi installed and running."
+if [ "$MODE" = "update" ]; then
+  echo "capi updated to $REMOTE_VERSION and restarted."
+else
+  echo "capi installed and running."
+fi
 echo "Visit http://$(hostname -I | awk '{print $1}'):8080"
