@@ -17,6 +17,8 @@ ExecStart=/opt/capi/capi -bind :8080 -name "CEC HTTP Bridge"
 # Restart policy
 Restart=on-failure
 RestartSec=10
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 # Security settings
 NoNewPrivileges=true

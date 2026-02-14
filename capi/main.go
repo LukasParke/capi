@@ -1499,8 +1499,21 @@ func main() {
 	}
 
 	log.Printf("Opening CEC adapter: %s", *adapterPath)
-	if err := cecConn.OpenAdapter(*adapterPath); err != nil {
-		log.Fatalf("Failed to open CEC adapter: %v", err)
+	{
+		const maxRetries = 5
+		backoff := 3 * time.Second
+		var openErr error
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			if openErr = cecConn.OpenAdapter(*adapterPath); openErr == nil {
+				break
+			}
+			if attempt == maxRetries {
+				log.Fatalf("Failed to open CEC adapter after %d attempts: %v", maxRetries, openErr)
+			}
+			log.Printf("Failed to open CEC adapter (attempt %d/%d): %v — retrying in %v", attempt, maxRetries, openErr, backoff)
+			time.Sleep(backoff)
+			backoff *= 2
+		}
 	}
 
 	log.Println("CEC connection established")
