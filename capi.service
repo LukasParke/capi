@@ -23,7 +23,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/dev
+ReadWritePaths=/dev /opt/capi
 
 # Logging
 StandardOutput=journal

@@ -465,6 +465,7 @@
         <div class="form-group">
           <label>Password</label>
           <input type="password" id="mqtt-pass" placeholder="(optional)">
+          <a href="#" id="mqtt-clear-pass" style="display:none;font-size:.75rem;margin-top:2px;color:var(--accent)" onclick="clearMQTTPassword();return false">Clear saved password</a>
         </div>
       </div>
       <div class="btn-row" style="margin-top:8px">
@@ -971,18 +972,29 @@
           qs('#mqtt-prefix').value = d.prefix || '';
           // Password: show placeholder if a password is saved
           var passEl = qs('#mqtt-pass');
+          var clearBtn = qs('#mqtt-clear-pass');
           if (d.pass === '***') {
             passEl.value = '';
             passEl.placeholder = '(saved - leave blank to keep)';
             mqttPassSentinel = true;
+            clearBtn.style.display = '';
           } else {
             passEl.value = '';
             passEl.placeholder = '(optional)';
             mqttPassSentinel = false;
+            clearBtn.style.display = 'none';
           }
           updateMQTTBadge(d);
         }
       }).catch(function () { /* ignore */ });
+    }
+
+    function clearMQTTPassword() {
+      mqttPassSentinel = false;
+      var passEl = qs('#mqtt-pass');
+      passEl.value = '';
+      passEl.placeholder = '(optional)';
+      qs('#mqtt-clear-pass').style.display = 'none';
     }
 
     function updateMQTTBadge(d) {
