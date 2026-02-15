@@ -31,6 +31,7 @@ var version = "dev"
 var (
 	cecConn    *cec.Connection
 	cecMutex   sync.Mutex
+	cecReady   bool // true once CEC adapter is opened successfully
 	logHandler *LogHandler
 	eventHub   *EventHub
 )
@@ -267,6 +268,19 @@ func respondSuccess(w http.ResponseWriter, message string, data interface{}) {
 	})
 }
 
+// requireCEC checks whether the CEC adapter is available. If not, it sends a
+// 503 response and returns false so the caller can bail out.
+func requireCEC(w http.ResponseWriter) bool {
+	cecMutex.Lock()
+	ready := cecReady
+	cecMutex.Unlock()
+	if !ready {
+		respondError(w, http.StatusServiceUnavailable, "CEC adapter not available")
+		return false
+	}
+	return true
+}
+
 // Device endpoints
 
 func deviceToMap(dev *cec.Device) map[string]interface{} {
@@ -294,6 +308,7 @@ func deviceToMap(dev *cec.Device) map[string]interface{} {
 }
 
 func getDevicesHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireCEC(w) { return }
 	// Optionally force a rescan when requested by the client.
 	rescanParam := r.URL.Query().Get("rescan")
 
@@ -332,6 +347,7 @@ func getDevicesHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func getDeviceHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireCEC(w) { return }
 	vars := mux.Vars(r)
 	addrStr := vars["address"]
 
@@ -370,6 +386,7 @@ func getDeviceHandler(w http.ResponseWriter, r *http.Request) {
 // Power control endpoints
 
 func powerOnHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireCEC(w) { return }
 	vars := mux.Vars(r)
 	addrStr := vars["address"]
 
@@ -396,6 +413,7 @@ func powerOnHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func powerOffHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireCEC(w) { return }
 	vars := mux.Vars(r)
 	addrStr := vars["address"]
 
@@ -422,6 +440,7 @@ func powerOffHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func getPowerStatusHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireCEC(w) { return }
 	vars := mux.Vars(r)
 	addrStr := vars["address"]
 
@@ -453,6 +472,7 @@ func getPowerStatusHandler(w http.ResponseWriter, r *http.Request) {
 // Volume control endpoints
 
 func volumeUpHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireCEC(w) { return }
 	vars := mux.Vars(r)
 	addrStr := vars["address"]
 
@@ -485,6 +505,7 @@ func volumeUpHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func volumeDownHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireCEC(w) { return }
 	vars := mux.Vars(r)
 	addrStr := vars["address"]
 
@@ -515,6 +536,7 @@ func volumeDownHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func muteHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireCEC(w) { return }
 	vars := mux.Vars(r)
 	addrStr := vars["address"]
 
@@ -547,6 +569,7 @@ func muteHandler(w http.ResponseWriter, r *http.Request) {
 // Source control endpoints
 
 func getActiveSourceHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireCEC(w) { return }
 	cecMutex.Lock()
 	defer cecMutex.Unlock()
 
@@ -563,6 +586,7 @@ func getActiveSourceHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func setActiveSourceHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireCEC(w) { return }
 	vars := mux.Vars(r)
 	addrStr := vars["address"]
 
@@ -585,6 +609,7 @@ func setActiveSourceHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func setHDMIPortHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireCEC(w) { return }
 	vars := mux.Vars(r)
 	portStr := vars["port"]
 
@@ -609,6 +634,7 @@ func setHDMIPortHandler(w http.ResponseWriter, r *http.Request) {
 // Navigation endpoints
 
 func sendKeyHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireCEC(w) { return }
 	var req struct {
 		Address int    `json:"address"`
 		Key     string `json:"key"`
@@ -679,6 +705,7 @@ func sendKeyHandler(w http.ResponseWriter, r *http.Request) {
 // Raw command endpoint
 
 func rawCommandHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireCEC(w) { return }
 	var req struct {
 		Initiator   int     `json:"initiator"`
 		Destination int     `json:"destination"`
@@ -791,6 +818,7 @@ func eventsSSEHandler(w http.ResponseWriter, r *http.Request) {
 // Topology endpoint
 
 func getTopologyHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireCEC(w) { return }
 	cecMutex.Lock()
 	topo := cecConn.GetBusTopology()
 	ownAddrs := cecConn.GetLogicalAddresses()
@@ -832,6 +860,7 @@ func getTopologyHandler(w http.ResponseWriter, r *http.Request) {
 // Audio status endpoint
 
 func getAudioStatusHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireCEC(w) { return }
 	cecMutex.Lock()
 	volume, muted, err := cecConn.GetAudioStatus()
 	cecMutex.Unlock()
@@ -995,6 +1024,14 @@ func startMQTT(broker, user, pass, prefix string) {
 // handleMQTTCommand dispatches an incoming MQTT message to the appropriate
 // CEC operation. Topic format: {prefix}/command/{action}[/{param}]
 func handleMQTTCommand(prefix, topic string, payload []byte) {
+	cecMutex.Lock()
+	ready := cecReady
+	cecMutex.Unlock()
+	if !ready {
+		log.Printf("[MQTT] Ignoring command %q: CEC adapter not available", topic)
+		return
+	}
+
 	cmdPath := strings.TrimPrefix(topic, prefix+"/command/")
 
 	switch {
@@ -1402,6 +1439,7 @@ func updateHandler(w http.ResponseWriter, r *http.Request) {
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	cecMutex.Lock()
+	ready := cecReady
 	libInfo := ""
 	if cecConn != nil {
 		// Protect against any unexpected panics inside libcec.
@@ -1417,8 +1455,9 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	cecMutex.Unlock()
 
 	respondSuccess(w, "Service is healthy", map[string]interface{}{
-		"version": version,
-		"libcec":  libInfo,
+		"version":   version,
+		"libcec":    libInfo,
+		"cec_ready": ready,
 	})
 }
 
@@ -1468,64 +1507,93 @@ func main() {
 		currentConfig.MQTT.Prefix = "capi"
 	}
 
-	// Initialize CEC
-	log.Println("Initializing CEC connection...")
-	var err error
-	cecConn, err = cec.Open(*deviceName, cec.DeviceTypeRecordingDevice)
-	if err != nil {
-		log.Fatalf("Failed to initialize CEC: %v", err)
-	}
-	defer cecConn.Close()
-
-	// Set up event hub and logging
+	// Set up event hub and logging (independent of CEC)
 	eventHub = NewEventHub(64)
 	logHandler = NewLogHandler()
-	cecConn.SetCallbackHandler(logHandler)
 
-	// Find and open adapter
-	if *adapterPath == "" {
-		log.Println("Searching for CEC adapters...")
-		adapters, err := cecConn.FindAdapters()
-		if err != nil || len(adapters) == 0 {
-			log.Fatalf("No CEC adapters found")
-		}
-		// Prefer device path (e.g. /dev/cec0) for opening; Path may be sysfs (e.g. built-in HDMI CEC)
-		if adapters[0].Comm != "" && strings.HasPrefix(adapters[0].Comm, "/dev/") {
-			*adapterPath = adapters[0].Comm
-		} else {
-			*adapterPath = adapters[0].Path
-		}
-		log.Printf("Found adapter: %s", *adapterPath)
-	}
-
-	log.Printf("Opening CEC adapter: %s", *adapterPath)
-	{
-		const maxRetries = 5
+	// Initialize CEC in background so the HTTP server starts regardless
+	go func() {
+		const maxBackoff = 60 * time.Second
 		backoff := 3 * time.Second
-		var openErr error
-		for attempt := 1; attempt <= maxRetries; attempt++ {
-			if openErr = cecConn.OpenAdapter(*adapterPath); openErr == nil {
-				break
+
+		for {
+			log.Println("Initializing CEC connection...")
+			conn, err := cec.Open(*deviceName, cec.DeviceTypeRecordingDevice)
+			if err != nil {
+				log.Printf("Failed to initialize CEC: %v — retrying in %v", err, backoff)
+				time.Sleep(backoff)
+				if backoff < maxBackoff {
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+				}
+				continue
 			}
-			if attempt == maxRetries {
-				log.Fatalf("Failed to open CEC adapter after %d attempts: %v", maxRetries, openErr)
+
+			conn.SetCallbackHandler(logHandler)
+
+			// Find adapter
+			adapter := *adapterPath
+			if adapter == "" {
+				log.Println("Searching for CEC adapters...")
+				adapters, err := conn.FindAdapters()
+				if err != nil || len(adapters) == 0 {
+					log.Printf("No CEC adapters found — retrying in %v", backoff)
+					conn.Close()
+					time.Sleep(backoff)
+					if backoff < maxBackoff {
+						backoff *= 2
+						if backoff > maxBackoff {
+							backoff = maxBackoff
+						}
+					}
+					continue
+				}
+				if adapters[0].Comm != "" && strings.HasPrefix(adapters[0].Comm, "/dev/") {
+					adapter = adapters[0].Comm
+				} else {
+					adapter = adapters[0].Path
+				}
+				log.Printf("Found adapter: %s", adapter)
 			}
-			log.Printf("Failed to open CEC adapter (attempt %d/%d): %v — retrying in %v", attempt, maxRetries, openErr, backoff)
-			time.Sleep(backoff)
-			backoff *= 2
+
+			// Open adapter
+			log.Printf("Opening CEC adapter: %s", adapter)
+			if err := conn.OpenAdapter(adapter); err != nil {
+				log.Printf("Failed to open CEC adapter: %v — retrying in %v", err, backoff)
+				conn.Close()
+				time.Sleep(backoff)
+				if backoff < maxBackoff {
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+				}
+				continue
+			}
+
+			log.Println("CEC connection established")
+			log.Println(conn.GetLibInfo())
+
+			// Wait for CEC bus to settle
+			time.Sleep(2 * time.Second)
+
+			// Publish the connection
+			cecMutex.Lock()
+			cecConn = conn
+			cecReady = true
+			cecMutex.Unlock()
+
+			log.Println("CEC adapter is ready")
+
+			// Start MQTT bridge if configured
+			if currentConfig.MQTT.Broker != "" {
+				startMQTT(currentConfig.MQTT.Broker, currentConfig.MQTT.User, currentConfig.MQTT.Pass, currentConfig.MQTT.Prefix)
+			}
+			return
 		}
-	}
-
-	log.Println("CEC connection established")
-	log.Println(cecConn.GetLibInfo())
-
-	// Wait for CEC to initialize
-	time.Sleep(2 * time.Second)
-
-	// Start MQTT bridge if configured (from config file or CLI flags)
-	if currentConfig.MQTT.Broker != "" {
-		startMQTT(currentConfig.MQTT.Broker, currentConfig.MQTT.User, currentConfig.MQTT.Pass, currentConfig.MQTT.Prefix)
-	}
+	}()
 
 	// Set up HTTP router
 	r := mux.NewRouter()
@@ -1617,5 +1685,10 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("HTTP server shutdown: %v", err)
 	}
-	// cecConn.Close() runs via defer at top of main
+	// Close CEC connection if it was established
+	cecMutex.Lock()
+	if cecConn != nil {
+		cecConn.Close()
+	}
+	cecMutex.Unlock()
 }
