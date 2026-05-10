@@ -41,7 +41,11 @@ jobs:
             echo "Using pushed tag: $VERSION"
           else
             BUMP="${{ github.event.inputs.bump || 'patch' }}"
-            LAST="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)"
+            # Only consider strict vMAJOR.MINOR.PATCH tags; ignore any legacy
+            # timestamp-style tags that might still exist in the repo.
+            LAST="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname \
+                    | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+                    | head -n 1)"
             if [[ -z "$LAST" ]]; then
               LAST="v0.0.0"
             fi
@@ -144,15 +148,14 @@ jobs:
       - name: Generate SHA256SUMS
         run: |
           set -euo pipefail
+          # actions/checkout already placed install.sh / capi.service /
+          # 99-cec.rules in the workspace root; download-artifact added the
+          # capi-linux-* binaries. We just hash everything in place.
           : > SHA256SUMS
           for f in capi-linux-* install.sh capi.service 99-cec.rules; do
             if [[ -f "$f" ]]; then
               sha256sum "$f" >> SHA256SUMS
             fi
-          done
-          # Bring install/service/udev files into the artifact set.
-          for f in install.sh capi.service 99-cec.rules; do
-            cp "$f" .
           done
           cat SHA256SUMS
 
@@ -161,7 +164,10 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ needs.tag.outputs.version }}"
-          PREV=$(git tag --list 'v[0-9]*' --sort=-v:refname | grep -v "^${VERSION}$" | head -n 1 || true)
+          PREV=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname \
+                 | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+                 | grep -v "^${VERSION}$" \
+                 | head -n 1 || true)
           {
             echo "## ${VERSION}"
             echo

@@ -31,7 +31,6 @@ fi
 : "${SSH_IP:?Set SSH_IP in .env}"
 
 PI_ARCH="${PI_ARCH:-arm64}"
-PI_LIBCEC="${PI_LIBCEC:-6}"
 PI_INSTALL_DIR="${PI_INSTALL_DIR:-/opt/capi}"
 PI_SERVICE="${PI_SERVICE:-capi.service}"
 
@@ -59,9 +58,49 @@ ssh_wrap() {
 run_ssh() { ssh_wrap ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "$@"; }
 run_scp() { ssh_wrap scp "${SSH_OPTS[@]}" "$@"; }
 
+# Detect the Pi's libcec ABI so we cross-build the matching variant. A binary
+# linked against libcec.so.6 will fail to load on a Trixie Pi (which only has
+# libcec.so.7), and vice versa - this is the most common iteration footgun,
+# so we auto-detect by default and only honor PI_LIBCEC when set explicitly.
+detect_pi_libcec() {
+  if [[ -n "${PI_LIBCEC:-}" ]]; then
+    echo "$PI_LIBCEC"
+    return
+  fi
+  local probe
+  probe=$(run_ssh bash -s <<'REMOTE' 2>/dev/null || true
+set -e
+# Prefer the actual installed shared object soname.
+for so in /usr/lib/*/libcec.so.* /usr/lib/libcec.so.*; do
+  [ -e "$so" ] || continue
+  case "$so" in
+    *.so.6*) echo 6; exit 0 ;;
+    *.so.7*) echo 7; exit 0 ;;
+  esac
+done
+# Fall back to dpkg.
+if command -v dpkg >/dev/null 2>&1; then
+  if dpkg -l libcec6 2>/dev/null | grep -q '^ii'; then echo 6; exit 0; fi
+  if dpkg -l libcec7 2>/dev/null | grep -q '^ii'; then echo 7; exit 0; fi
+fi
+exit 1
+REMOTE
+  )
+  case "$probe" in
+    6|7) echo "$probe" ;;
+    *)
+      echo "ERROR: could not detect libcec ABI on ${SSH_TARGET}; set PI_LIBCEC=6|7 in .env." >&2
+      exit 1
+      ;;
+  esac
+}
+
+PI_LIBCEC="$(detect_pi_libcec)"
+echo "==> ${SSH_TARGET}: libcec.so.${PI_LIBCEC} (ARCH=${PI_ARCH})"
+
 ARTIFACT="dist/capi-linux-${PI_ARCH}-libcec${PI_LIBCEC}"
 
-echo "==> cross-building $ARTIFACT"
+echo "==> cross-building $ARTIFACT (PI_ARCH=$PI_ARCH PI_LIBCEC=$PI_LIBCEC)"
 bash scripts/cross-build.sh "$PI_ARCH" "$PI_LIBCEC"
 
 if [[ ! -x "$ARTIFACT" ]]; then

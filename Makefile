@@ -38,7 +38,10 @@ SERVICE_PATH   = /etc/systemd/system/$(SERVICE_NAME)
 UDEV_RULES     = 99-cec.rules
 UDEV_PATH      = /etc/udev/rules.d/$(UDEV_RULES)
 ENV_DEFAULTS   = /etc/default/capi
-VERSION       ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# Match strict semver tags only (vMAJOR.MINOR.PATCH). The --exclude='*-*'
+# filters out the repo's legacy timestamp-style tags (v20260215.074327-abcdef)
+# whose hyphenated SHA suffix would otherwise satisfy the glob match.
+VERSION       ?= $(shell git describe --tags --match='v[0-9]*.[0-9]*.[0-9]*' --exclude='*-*' --always --dirty 2>/dev/null || echo dev)
 LDFLAGS_VER    = -ldflags "-X main.version=$(VERSION)"
 LDFLAGS_REL    = -ldflags "-X main.version=$(VERSION) -s -w"
 CGO_LDFLAGS   ?= -Wl,--no-as-needed -lstdc++ -Wl,--as-needed
