@@ -3,13 +3,67 @@ name: Build and Release
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Semver bump (patch | minor | major)'
+        required: false
+        default: 'patch'
 
 permissions:
   contents: write
 
 jobs:
+  # tag: figure out the next version once, share it with the build matrix.
+  #
+  #   - When triggered by a `v*` tag push, use that tag verbatim.
+  #   - Otherwise, look up the latest existing v* tag, bump it (patch by
+  #     default; respect workflow_dispatch.inputs.bump) and create the new
+  #     tag pointing at HEAD before fanning out to the build jobs.
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Compute next version
+        id: version
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+            echo "Using pushed tag: $VERSION"
+          else
+            BUMP="${{ github.event.inputs.bump || 'patch' }}"
+            LAST="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)"
+            if [[ -z "$LAST" ]]; then
+              LAST="v0.0.0"
+            fi
+            STRIPPED="${LAST#v}"
+            IFS='.' read -r MAJOR MINOR PATCH <<<"$STRIPPED"
+            case "$BUMP" in
+              major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR+1)); PATCH=0 ;;
+              patch|*) PATCH=$((PATCH+1)) ;;
+            esac
+            VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+            echo "Bumping ${LAST} (${BUMP}) -> ${VERSION}"
+
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "$VERSION" -m "Release $VERSION"
+            git push origin "$VERSION"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: tag
     runs-on: ubuntu-latest
     strategy:
       fail-fast: true
@@ -17,15 +71,24 @@ jobs:
         include:
           - arch: arm64
             platform: linux/arm64
-            image: debian:bookworm
+            base_image: debian:bookworm
+            libcec: "6"
             go_tarball: go1.25.2.linux-arm64.tar.gz
-            binary: capi-linux-arm64
+            binary: capi-linux-arm64-libcec6
+            goarm: ""
+          - arch: arm64
+            platform: linux/arm64
+            base_image: debian:trixie
+            libcec: "7"
+            go_tarball: go1.25.2.linux-arm64.tar.gz
+            binary: capi-linux-arm64-libcec7
             goarm: ""
           - arch: armv6
             platform: linux/arm/v7
-            image: debian:bookworm
+            base_image: debian:bookworm
+            libcec: "6"
             go_tarball: go1.25.2.linux-armv6l.tar.gz
-            binary: capi-linux-armv6
+            binary: capi-linux-armv6-libcec6
             goarm: "6"
     steps:
       - name: Checkout
@@ -36,21 +99,16 @@ jobs:
         with:
           platforms: arm64,arm
 
-      - name: Generate version string
-        id: version
-        run: |
-          VERSION="v$(git log -1 --format=%cd --date=format:%Y%m%d.%H%M%S)-$(git rev-parse --short HEAD)"
-          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Building version: $VERSION"
-
-      - name: Build ${{ matrix.arch }} binary
+      - name: Build ${{ matrix.binary }}
+        env:
+          VERSION: ${{ needs.tag.outputs.version }}
         run: |
           docker run --rm \
             --platform ${{ matrix.platform }} \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
-            -e VERSION="${{ steps.version.outputs.VERSION }}" \
-            ${{ matrix.image }} bash -c '
+            -e VERSION="${VERSION}" \
+            ${{ matrix.base_image }} bash -c '
               set -e
               apt-get update && apt-get install -y --no-install-recommends \
                 gcc g++ libc6-dev curl pkg-config libcec-dev libp8-platform-dev libudev-dev ca-certificates
@@ -69,34 +127,83 @@ jobs:
           path: ${{ matrix.binary }}
 
   release:
-    needs: build
+    needs: [tag, build]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           merge-multiple: true
 
-      - name: Generate version string
-        id: version
+      - name: Generate SHA256SUMS
         run: |
-          VERSION="v$(git log -1 --format=%cd --date=format:%Y%m%d.%H%M%S)-$(git rev-parse --short HEAD)"
-          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Releasing version: $VERSION"
+          set -euo pipefail
+          : > SHA256SUMS
+          for f in capi-linux-* install.sh capi.service 99-cec.rules; do
+            if [[ -f "$f" ]]; then
+              sha256sum "$f" >> SHA256SUMS
+            fi
+          done
+          # Bring install/service/udev files into the artifact set.
+          for f in install.sh capi.service 99-cec.rules; do
+            cp "$f" .
+          done
+          cat SHA256SUMS
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.tag.outputs.version }}"
+          PREV=$(git tag --list 'v[0-9]*' --sort=-v:refname | grep -v "^${VERSION}$" | head -n 1 || true)
+          {
+            echo "## ${VERSION}"
+            echo
+            if [[ -n "$PREV" ]]; then
+              echo "Changes since ${PREV}:"
+              echo
+              git log --pretty=format:'- %s (%h)' "${PREV}..${VERSION}" | sed -e 's/[`<>]//g'
+              echo
+              echo
+              echo "**Full diff:** https://github.com/${{ github.repository }}/compare/${PREV}...${VERSION}"
+            else
+              echo "Initial release."
+            fi
+            echo
+            echo "### Downloads"
+            echo
+            echo "| File | Description |"
+            echo "|------|-------------|"
+            for f in capi-linux-arm64-libcec6 capi-linux-arm64-libcec7 capi-linux-armv6-libcec6; do
+              [[ -f "$f" ]] && echo "| \`$f\` | $(file -b "$f" 2>/dev/null || echo binary) |"
+            done
+            echo
+            echo "### Verify"
+            echo
+            echo '\`\`\`'
+            echo "curl -sSL -O https://github.com/${{ github.repository }}/releases/download/${VERSION}/SHA256SUMS"
+            echo "sha256sum -c SHA256SUMS --ignore-missing"
+            echo '\`\`\`'
+          } > CHANGELOG.md
+          cat CHANGELOG.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.VERSION }}
-          name: ${{ steps.version.outputs.VERSION }}
-          body: "Automated release ${{ steps.version.outputs.VERSION }}"
+          tag_name: ${{ needs.tag.outputs.version }}
+          name: ${{ needs.tag.outputs.version }}
+          body_path: CHANGELOG.md
           files: |
-            capi-linux-arm64
-            capi-linux-armv6
+            capi-linux-arm64-libcec6
+            capi-linux-arm64-libcec7
+            capi-linux-armv6-libcec6
             install.sh
             capi.service
             99-cec.rules
-            capi/index.html
+            SHA256SUMS

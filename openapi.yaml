@@ -6,7 +6,7 @@ info:
     TVs and devices, control volume, switch inputs (HDMI ports), send remote
     key presses, send raw CEC commands, and manage MQTT settings. Intended
     for home automation, media centers, and scripting.
-  version: 1.1.0
+  version: 1.2.0
   license:
     name: MIT
     url: https://opensource.org/licenses/MIT
@@ -34,7 +34,9 @@ tags:
   - name: Raw
     description: Raw CEC commands
   - name: System
-    description: Topology, audio status, logs, health, events, and updates
+    description: Topology, audio status, logs, health, events, bus steward state, and updates
+  - name: Bus
+    description: Cached CEC bus snapshot, deep scans, and optional frame capture
   - name: Settings
     description: MQTT and service configuration
 
@@ -44,13 +46,25 @@ paths:
       tags: [Devices]
       summary: List CEC devices
       description: |
-        List active CEC devices on the bus. By default uses cached device info.
-        Use query `rescan=1` or `rescan=true` to force a full bus rescan.
+        Returns devices from the **bus steward** cache when neither `live` nor `rescan`
+        is set and a recent scan is available (fast). With an empty cache and no query
+        flags, the server runs a **light** reconcile (no `RescanDevices`, still polls
+        addresses and `GetDeviceInfo`). Use `rescan=1` or `live=1` for a **full**
+        reconcile including `RescanDevices`. Scans can take tens of seconds on slow
+        buses; the server may respond with **504** after about 50s. Use `GET /api/bus/state`
+        for `stale`, `last_full_scan_at`, and `scan_in_progress`.
       operationId: getDevices
       parameters:
+        - name: live
+          in: query
+          description: Force immediate full reconcile (same as rescan=1)
+          required: false
+          schema:
+            type: string
+            enum: ['1', 'true']
         - name: rescan
           in: query
-          description: Force a full bus rescan before returning (1 or true)
+          description: Force a full bus reconcile before returning (1 or true)
           required: false
           schema:
             type: string
@@ -81,6 +95,71 @@ paths:
                     is_active_source: false
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          description: Bus steward queue full
+        '504':
+          description: Scan timed out (server limit ~50s; allow longer client timeouts)
+
+  /bus/state:
+    get:
+      tags: [Bus]
+      summary: Bus steward snapshot
+      description: |
+        Cached CEC bus state including `devices` (same shape as `GET /api/devices`),
+        `active_source`, `logical_addresses`, `stale`, `scan_in_progress`, and optional
+        `recent_frames` when `bus.frame_ring_size` is set in `config.json` (captures
+        decoded frames from `OnCommand`; can be CPU-heavy combined with `monitor: true`
+        or `-cec-monitor`).
+      operationId: getBusState
+      responses:
+        '200':
+          description: Bus state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /bus/scan:
+    post:
+      tags: [Bus]
+      summary: Queue deep bus scan
+      description: |
+        Accepts immediately (HTTP 202) and runs an extended reconcile: RescanDevices,
+        extra settle (`bus.deep_settle_ms`), full enumeration, optional **Give*** probe
+        transmits per device, then a broadcast Give Physical Address. Poll
+        `GET /api/bus/state` until `scan_in_progress` is false. Vendor-specific skips:
+        `bus.vendor_profiles` in `config.json`.
+      operationId: postBusScan
+      responses:
+        '202':
+          description: Deep scan queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '503':
+          description: Steward queue full
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /bus/frames:
+    get:
+      tags: [Bus]
+      summary: Recent captured CEC frames
+      description: |
+        Returns entries from the ring buffer populated when `bus.frame_ring_size` > 0
+        (each `OnCommand` callback appends a row). Independent of libCEC monitoring
+        verbosity; use together with `bus.monitor` or `-cec-monitor` to see traffic.
+      operationId: getBusFrames
+      responses:
+        '200':
+          description: Frame list (may be empty)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
 
   /devices/{address}:
     get:
@@ -220,7 +299,11 @@ paths:
     post:
       tags: [Volume]
       summary: Volume up
-      description: Increase system volume by one step (audio system).
+      description: |
+        Without `{address}`: enables **Set System Audio Mode ON** toward the TV, then
+        sends **User Control** volume up to logical addresses **5** (audio), **0** (TV),
+        then playback roles, then falls back to **libcec** volume. With `{address}`:
+        volume key only to that device.
       operationId: volumeUp
       responses:
         '200':
@@ -256,7 +339,7 @@ paths:
     post:
       tags: [Volume]
       summary: Volume down
-      description: Decrease system volume by one step (audio system).
+      description: Same strategy as `POST /volume/up` (SAM nudge, then keys, then libcec).
       operationId: volumeDown
       responses:
         '200':
@@ -292,7 +375,7 @@ paths:
     post:
       tags: [Volume]
       summary: Toggle mute
-      description: Toggle audio mute (audio system).
+      description: Same pass-through order as volume, then **libcec** mute toggle.
       operationId: volumeMute
       responses:
         '200':
@@ -513,6 +596,8 @@ paths:
                 data:
                   volume: 45
                   muted: false
+                  volume_raw: 45
+                  raw_status: 69
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -520,7 +605,9 @@ paths:
     get:
       tags: [System]
       summary: Get recent logs
-      description: Get recent CEC log messages (traffic, notices, errors). Up to 100 most recent entries.
+      description: |
+        Recent log lines from libCEC (traffic, notices, errors) plus application-level entries (level `APP`)
+        from HTTP/MQTT actions. Ring buffer holds up to 500 entries; newest last in the JSON array.
       operationId: getLogs
       responses:
         '200':
@@ -533,8 +620,11 @@ paths:
                 status: success
                 message: Logs retrieved
                 data:
-                  - level: NOTICE
+                  - level: APP
                     timestamp: "2026-02-12T10:30:45Z"
+                    message: "[http] listening on :8080 version=v1.0.0"
+                  - level: NOTICE
+                    timestamp: "2026-02-12T10:30:46Z"
                     message: CEC connection opened
         '500':
           $ref: '#/components/responses/InternalError'
@@ -546,7 +636,9 @@ paths:
       description: |
         Real-time stream of CEC bus events using Server-Sent Events (SSE).
         Events are JSON objects with `type`, `timestamp`, and `data` fields.
-        Event types: `power_change`, `source_activated`, `key_press`, `command`, `alert`.
+        Event types: `power_change`, `source_activated`, `key_press`, `command`, `alert`,
+        `devices_changed` (after a debounced bus rescan; payload includes `logical_addresses`),
+        `configuration_changed` (libCEC client config), `adapter_state` (`connected` / `disconnected`).
         Sends a keepalive comment every 15 seconds.
       operationId: getEvents
       responses:
@@ -558,6 +650,25 @@ paths:
                 type: string
               example: |
                 data: {"type":"power_change","timestamp":"2026-02-12T10:30:45Z","data":{"address":0,"status":"on"}}
+                data: {"type":"devices_changed","timestamp":"2026-02-12T10:31:02Z","data":{"reason":"bus_topology","logical_addresses":[0,1,4]}}
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /events/ws:
+    get:
+      tags: [System]
+      summary: WebSocket stream for the embedded HTMX UI
+      description: |
+        Upgrades to a WebSocket (`ws://` or `wss://` matching the page origin).
+        Text frames are **HTML** fragments with `hx-swap-oob` targets used by htmx 1.x
+        `hx-ws` (live event log, bus banner, and selective panel refreshes).
+        For JSON event payloads and scripts, use `GET /events` (Server-Sent Events) instead.
+      operationId: getEventsWebSocket
+      responses:
+        '101':
+          description: Switching Protocols — WebSocket per RFC 6455 (response not JSON)
+        '400':
+          description: Bad upgrade request
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -790,7 +901,17 @@ components:
           type: integer
           minimum: 0
           maximum: 100
-          description: Volume level percentage
+          description: Volume percentage for UI (clamped to 0–100 when CEC reports >100)
+        volume_raw:
+          type: integer
+          minimum: 0
+          maximum: 255
+          description: Raw volume byte from CEC `Report Audio Status` (0–100 typical; some devices send higher)
+        raw_status:
+          type: integer
+          minimum: 0
+          maximum: 255
+          description: Full first status byte from libCEC (includes mute bit in high nibble per CEC spec)
         muted:
           type: boolean
           description: Whether audio is muted

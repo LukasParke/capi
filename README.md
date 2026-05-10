@@ -10,9 +10,40 @@ Run this on the target device (Raspberry Pi, etc.) as root:
 curl -sSL https://raw.githubusercontent.com/LukasParke/capi/main/install.sh | sudo bash
 ```
 
-This downloads the latest release binary, installs systemd/udev files, and starts the service. Once running, open `http://<device-ip>:8080` in a browser.
+The installer:
 
-To **update** an existing installation, run the same command again -- or use the web UI's one-click update button, or run `sudo /opt/capi/capi -update`.
+- Detects the host architecture (`arm64` / `armv6`) and the installed libcec ABI (`libcec6` on Debian 12 / Pi OS Bookworm; `libcec7` on Debian 13+ / Trixie) and downloads the matching release binary.
+- Verifies every download against the release's `SHA256SUMS`.
+- Atomically swaps the binary, installs (or preserves) `/etc/systemd/system/capi.service`, the `/etc/udev/rules.d/99-cec.rules`, and `/etc/default/capi` (for extra CLI flags), then starts the service.
+
+Once running, open `http://<device-ip>:8080`.
+
+To **update**, run the same command again, or use the web UI's update button, or run `sudo /opt/capi/capi -update`.
+
+### Verifying a download manually
+
+```bash
+VERSION=v0.1.0  # or whichever release
+cd /tmp
+curl -sSL -O "https://github.com/LukasParke/capi/releases/download/${VERSION}/SHA256SUMS"
+curl -sSL -O "https://github.com/LukasParke/capi/releases/download/${VERSION}/capi-linux-arm64-libcec6"
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+### Pinning a specific release
+
+```bash
+curl -sSL https://raw.githubusercontent.com/LukasParke/capi/main/install.sh \
+  | sudo VERSION=v0.1.0 bash
+```
+
+### Forcing a libcec variant
+
+The installer's libcec ABI detection can be overridden if it picks the wrong artifact:
+
+```bash
+curl -sSL .../install.sh | sudo FORCE_LIBCEC=7 bash
+```
 
 ## Features
 
@@ -59,21 +90,22 @@ To **update** an existing installation, run the same command again -- or use the
 
 ### Systemd Service
 
-The install script sets up `/etc/systemd/system/capi.service` running as the `capi` system user. To configure flags (e.g. enable MQTT), edit the service file:
+The install script sets up `/etc/systemd/system/capi.service` running as the `capi` system user with kernel-namespace, `ProtectSystem=strict`, and friends.
+
+The simplest way to pass extra CLI flags is via `/etc/default/capi`, which the unit reads via `EnvironmentFile=`:
 
 ```bash
-sudo systemctl edit capi.service
+# /etc/default/capi
+CAPI_EXTRA_FLAGS=-mqtt-broker tcp://localhost:1883 -mqtt-prefix capi
 ```
 
-Add an override for `ExecStart`:
+Then `sudo systemctl restart capi`. The unit's `ExecStart` is:
 
-```ini
-[Service]
-ExecStart=
-ExecStart=/opt/capi/capi -bind :8080 -mqtt-broker tcp://localhost:1883
+```
+ExecStart=/opt/capi/capi -bind :8080 -name "CEC HTTP Bridge" $CAPI_EXTRA_FLAGS
 ```
 
-Then restart: `sudo systemctl restart capi`.
+For a full unit override, use `sudo systemctl edit capi.service` and replace `ExecStart=` with two lines (the first empty to reset, the second with your full command). The installer leaves your unit untouched if it detects a `capi.service.d/` override directory.
 
 ### Configuration Persistence
 
@@ -89,7 +121,7 @@ All responses are JSON: `{"status": "success"|"error", "message": "...", "data":
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/devices` | List active CEC devices. Add `?rescan=1` to force bus rescan. |
+| GET | `/api/devices` | List CEC devices. Without `rescan`, merges **POLL** probes for common logical roles so sinks (playback/audio) missing from libcec’s active mask still appear. `?rescan=1` forces a bus rescan and **full** POLL sweep (0–14). |
 | GET | `/api/devices/{address}` | Get device info by logical address (0-15). |
 
 ### Power
@@ -107,7 +139,7 @@ All responses are JSON: `{"status": "success"|"error", "message": "...", "data":
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/volume/up` | Volume up (audio system). |
+| POST | `/api/volume/up` | Volume up via libcec (targets the TV’s **system audio** path). If volume should go to another device (e.g. Chromecast / Google TV), use `/api/volume/up/{address}` with that device’s logical address. |
 | POST | `/api/volume/up/{address}` | Volume up to specific device. |
 | POST | `/api/volume/down` | Volume down. |
 | POST | `/api/volume/down/{address}` | Volume down to specific device. |
@@ -143,7 +175,7 @@ Supported key names: `up`, `down`, `left`, `right`, `select`, `enter`, `back`, `
 | GET | `/api/topology` | Get CEC bus topology (own addresses, active ports, devices per port). |
 | GET | `/api/audio/status` | Get volume level and mute state. |
 | GET | `/api/logs` | Get recent CEC log messages. |
-| GET | `/api/events` | Server-Sent Events stream of CEC bus events. |
+| GET | `/api/events` | SSE stream: power/source/key/command/alert plus `devices_changed` (debounced rescan), `adapter_state`, `configuration_changed`. |
 | GET | `/api/health` | Health check (version, libcec info). |
 | POST | `/api/update` | Trigger self-update from latest GitHub release. |
 | GET | `/api/settings/mqtt` | Get MQTT configuration and connection status. |
@@ -201,6 +233,9 @@ Events from the CEC bus are published in real time:
 | `capi/event/key_press` | `{"keycode":0,"duration":0}` | Remote key pressed. |
 | `capi/event/command` | `{"initiator":0,"destination":1,"opcode":"0x90"}` | Raw CEC command seen on bus. |
 | `capi/event/alert` | `{"alert":1,"param":0}` | CEC adapter alert. |
+| `capi/event/devices_changed` | `{"reason":"bus_topology","logical_addresses":[0,1,4]}` | After a bus rescan; device list or topology may have changed. |
+| `capi/event/configuration_changed` | `{"device_name":"CEC HTTP Bridge"}` | libCEC client configuration changed. |
+| `capi/event/adapter_state` | `{"state":"connected"}` or `{"state":"disconnected"}` | HDMI/USB adapter session up or down (reconnect loop). |
 
 ### Command Topics (MQTT to CEC)
 
@@ -262,7 +297,7 @@ Connect to `GET /api/events` for a Server-Sent Events stream of CEC bus activity
 curl -N http://localhost:8080/api/events
 ```
 
-Events are JSON objects with `type`, `timestamp`, and `data` fields. Event types: `power_change`, `source_activated`, `key_press`, `command`, `alert`.
+Events are JSON objects with `type`, `timestamp`, and `data` fields. Event types: `power_change`, `source_activated`, `key_press`, `command`, `alert`, `devices_changed`, `configuration_changed`, `adapter_state`. The service debounces bus rescans on topology-related traffic and emits `devices_changed` after `RescanDevices()` so clients can refresh the device list (the web UI does this automatically).
 
 ## Self-Update
 
@@ -296,37 +331,64 @@ The update downloads the new binary and web UI from the latest GitHub release, t
 ### Building from Source
 
 ```bash
-# Install build dependencies
-sudo make setup
-
-# Build
-make build
-
-# Build optimized release binary
-make release
-
-# Build with race detector
-make dev
+sudo make setup        # apt install pkg-config libcec-dev libp8-platform-dev cec-utils
+make build             # native build -> ./capi-server
+make release           # optimized native build (-s -w)
+make dev               # native build with -race
+make test              # go test -race ./cec ./capi
+make bench             # benchmark suite
 ```
+
+### Iteration loop: dev machine → local Pi
+
+For working against a Raspberry Pi over SSH, keep iteration time short by cross-building on your dev machine and pushing only the binary:
+
+```bash
+cp .env.example .env   # fill in SSH_USER / SSH_IP (and SSH_PASSWORD if not using keys)
+
+# First time on a Docker host that needs QEMU for non-native arch:
+docker run --privileged --rm tonistiigi/binfmt --install all
+
+make push-pi           # cross-build (Docker), scp, restart, curl /api/health
+make logs-pi           # tail journalctl -u capi.service on the Pi
+make logs-pi-follow    # follow mode
+```
+
+`push-pi` only swaps the binary; the systemd unit, udev rule, and `/etc/default/capi` are managed by `install.sh` (run once on the Pi). The cross-build picks `arm64` + `libcec6` by default; override with `PI_ARCH=armv6` and/or `PI_LIBCEC=7` either in `.env` or on the make line.
+
+For environments without Docker, `make deploy-pi` falls back to the slower path of rsync-then-build-on-Pi.
+
+### Releases
+
+A push to `main` (or a manual `workflow_dispatch`) auto-bumps the patch component of the latest `v*` tag, tags the new commit, runs the cross-build matrix in CI, and publishes:
+
+- `capi-linux-arm64-libcec6` (Raspberry Pi OS Bookworm / Debian 12)
+- `capi-linux-arm64-libcec7` (Raspberry Pi OS Trixie / Debian 13+)
+- `capi-linux-armv6-libcec6` (Pi 1 / Zero W on Bookworm)
+- `install.sh`, `capi.service`, `99-cec.rules`, `SHA256SUMS`
+- A changelog generated from `git log` since the previous tag
+
+For minor or major bumps, push the tag yourself before merging:
+
+```bash
+git tag v0.5.0 && git push origin v0.5.0   # workflow uses this tag verbatim
+```
+
+Or use the workflow's manual dispatch with `bump=minor` / `bump=major`.
 
 ### Makefile Targets
 
 | Target | Description |
 |--------|-------------|
-| `make build` | Build the binary |
-| `make release` | Build optimized release binary |
-| `make dev` | Build with race detector |
-| `make install` | Install as systemd service |
-| `make deploy` | Install, enable, and start service |
-| `make uninstall` | Remove systemd service |
-| `make clean` | Remove build artifacts |
-| `make test` | Run tests |
-| `make run` | Build and run locally |
-| `make run-local` | Build and run on localhost only |
-| `make status` | Show service status |
-| `make logs` | Follow service logs |
-| `make restart` | Restart service |
-| `make deps` | Check build dependencies |
+| `make build` / `release` / `dev` | Native builds |
+| `make test` / `bench` | Tests, benchmarks |
+| `make cross-build` | ARM cross-compile (PI_ARCH/PI_LIBCEC env) |
+| `make push-pi` | Cross-build + scp + restart on Pi (`.env`) |
+| `make logs-pi` / `logs-pi-follow` | Tail Pi journalctl |
+| `make deploy-pi` | Slow fallback: source-build on Pi |
+| `make install` / `deploy` | On-target install + start (run on the Pi) |
+| `make uninstall` | Remove the service (leaves `/etc/default/capi`) |
+| `make status` / `logs` / `restart` | Local systemd helpers |
 
 ### Testing
 
@@ -377,15 +439,39 @@ echo "scan" | cec-client -s -d 8
 dpkg -l | grep libcec
 ```
 
+### Missing devices or volume on a projector / switch
+
+CEC only sees devices that share the **same switched path** as your Pi’s HDMI input. A Google Home or streamer on **another** HDMI port on the projector may not participate in CEC, or the projector may not merge that port into the same logical bus.
+
+- Call **`GET /api/devices?rescan=1`** so the service runs a full bus rescan and **POLL**s every logical address (0–14); devices that ACK but were omitted from libcec’s active list are then listed.
+- For volume, **`POST /api/volume/up`** uses libcec’s default audio routing (often the TV or ARC path). If the device you want is listed at a specific logical address (often **5** for Audio System or **4** for Playback 1), use **`POST /api/volume/up/5`** (replace `5` with the address from the device list).
+- If a device never appears even after `rescan=1`, it likely does not speak CEC on that input, or the display is not bridging CEC between ports (hardware limitation, not something software can fix).
+
 ## Go Package
 
-The `cec` package can be used independently as a Go library:
+The `cec` package is published at `github.com/LukasParke/capi/cec` and can be used independently as a Go library. It wraps libcec via cgo with a typed events channel and internal serialization.
+
+```bash
+go get github.com/LukasParke/capi/cec
+```
 
 ```go
-import "capi/cec"
+import "github.com/LukasParke/capi/cec"
 
 conn, _ := cec.Open("My Device", cec.DeviceTypePlaybackDevice)
 defer conn.Close()
+
+// Drain async events on a goroutine; channel is closed by Close().
+go func() {
+    for ev := range conn.Events() {
+        switch ev.Kind {
+        case cec.EventKeyPress:
+            fmt.Println("key:", ev.Key.Key)
+        case cec.EventCommand:
+            fmt.Println("cmd:", ev.Command.Opcode)
+        }
+    }
+}()
 
 adapters, _ := conn.FindAdapters()
 conn.OpenAdapter(adapters[0].Path)
@@ -394,11 +480,13 @@ conn.PowerOn(cec.LogicalAddressTV)
 conn.SwitchToHDMIPort(2)
 conn.VolumeUp(true)
 
-devices, _ := conn.GetAllDevices()
+devices, _ := conn.GetAllDevices(2 * time.Second)
 for _, dev := range devices {
-    fmt.Printf("%s: %s\n", dev.OSDName, dev.PowerStatus.String())
+    fmt.Printf("%s: %s\n", dev.OSDName, dev.PowerStatus)
 }
 ```
+
+Every `*cec.Connection` method is safe to call from multiple goroutines; libcec calls are serialized inside the package. `Events()` fires on libcec threads and never blocks a Go goroutine — slow consumers see drops instead of pressure.
 
 See `examples/example.go` for comprehensive usage.
 

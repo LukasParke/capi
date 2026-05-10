@@ -1,4 +1,4 @@
-module capi
+module github.com/LukasParke/capi
 
 go 1.25.0
 

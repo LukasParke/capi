@@ -1,0 +1,21 @@
+{{define "nav_panel"}}
+<h2>Navigation keys</h2>
+<p style="font-size:.72rem;color:var(--muted);margin-bottom:8px">Sends CEC UI control to the chosen logical address.</p>
+<form id="nav-frm" class="btn-row" style="flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
+  <label>Target LA
+    <select name="addr">
+      {{range .Addrs}}<option value="{{.}}">{{.}}</option>{{end}}
+    </select>
+  </label>
+</form>
+<div class="btn-row" style="flex-wrap:wrap;gap:6px">
+  <button type="button" class="sm" hx-post="/ui/action/nav_key" hx-include="#nav-frm" hx-vals='{"key":"up"}' hx-target="#action-flash" hx-swap="innerHTML">up</button>
+  <button type="button" class="sm" hx-post="/ui/action/nav_key" hx-include="#nav-frm" hx-vals='{"key":"down"}' hx-target="#action-flash" hx-swap="innerHTML">down</button>
+  <button type="button" class="sm" hx-post="/ui/action/nav_key" hx-include="#nav-frm" hx-vals='{"key":"left"}' hx-target="#action-flash" hx-swap="innerHTML">left</button>
+  <button type="button" class="sm" hx-post="/ui/action/nav_key" hx-include="#nav-frm" hx-vals='{"key":"right"}' hx-target="#action-flash" hx-swap="innerHTML">right</button>
+  <button type="button" class="sm" hx-post="/ui/action/nav_key" hx-include="#nav-frm" hx-vals='{"key":"select"}' hx-target="#action-flash" hx-swap="innerHTML">select</button>
+  <button type="button" class="sm" hx-post="/ui/action/nav_key" hx-include="#nav-frm" hx-vals='{"key":"back"}' hx-target="#action-flash" hx-swap="innerHTML">back</button>
+  <button type="button" class="sm" hx-post="/ui/action/nav_key" hx-include="#nav-frm" hx-vals='{"key":"home"}' hx-target="#action-flash" hx-swap="innerHTML">home</button>
+  <button type="button" class="sm" hx-post="/ui/action/nav_key" hx-include="#nav-frm" hx-vals='{"key":"menu"}' hx-target="#action-flash" hx-swap="innerHTML">menu</button>
+</div>
+{{end}}

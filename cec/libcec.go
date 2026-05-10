@@ -1,469 +1,499 @@
 package cec
 
 /*
-#cgo pkg-config: libcec
-#cgo LDFLAGS: -Wl,--no-as-needed -lstdc++ -Wl,--as-needed
 #include <libcec/cecc.h>
 #include <stdlib.h>
+#include <stdint.h>
 
-// Callback forwarders
-extern void goLogMessageCallback(void*, const cec_log_message*);
-extern void goKeyPressCallback(void*, const cec_keypress*);
-extern void goCommandCallback(void*, const cec_command*);
-extern void goConfigurationChangedCallback(void*, const libcec_configuration*);
-extern void goAlertCallback(void*, const libcec_alert, const libcec_parameter);
-extern int goMenuStateChangedCallback(void*, const cec_menu_state);
-extern void goSourceActivatedCallback(void*, const cec_logical_address, const uint8_t);
-
-// Callback struct initialization helper
-static ICECCallbacks* createCallbacks() {
-    ICECCallbacks* callbacks = (ICECCallbacks*)malloc(sizeof(ICECCallbacks));
-    callbacks->logMessage = goLogMessageCallback;
-    callbacks->keyPress = goKeyPressCallback;
-    callbacks->commandReceived = goCommandCallback;
-    callbacks->configurationChanged = goConfigurationChangedCallback;
-    callbacks->alert = goAlertCallback;
-    callbacks->menuStateChanged = goMenuStateChangedCallback;
-    callbacks->sourceActivated = goSourceActivatedCallback;
-    return callbacks;
-}
+extern void cec_install_callbacks(libcec_configuration* cfg, uintptr_t handle);
 */
 import "C"
+
 import (
-	"errors"
+	"context"
 	"fmt"
-	"sync"
 	"time"
 	"unsafe"
 )
 
-// Connection represents a connection to the CEC adapter
-type Connection struct {
-	handle      C.libcec_connection_t
-	config      *Configuration
-	callbacks   CallbackHandler
-	mu          sync.Mutex
-	initialized bool
-}
-
-// Configuration holds CEC configuration
-type Configuration struct {
-	DeviceName        string
-	DeviceType        DeviceType
-	PhysicalAddress   uint16
-	BaseDevice        LogicalAddress
-	HDMIPort          uint8
-	ClientVersion     uint32
-	ServerVersion     uint32
-	TryLogicalAddress LogicalAddress
-}
-
-// CallbackHandler interface for handling CEC events
-type CallbackHandler interface {
-	OnLogMessage(level LogLevel, time int64, message string)
-	OnKeyPress(key Keycode, duration uint32)
-	OnCommand(command *Command)
-	OnConfigurationChanged(config *Configuration)
-	OnAlert(alert Alert, param Parameter)
-	OnMenuStateChanged(state MenuState) bool
-	OnSourceActivated(address LogicalAddress, activated bool)
-}
-
-// DefaultCallbackHandler provides no-op implementations
-type DefaultCallbackHandler struct{}
-
-func (d *DefaultCallbackHandler) OnLogMessage(level LogLevel, time int64, message string)  {}
-func (d *DefaultCallbackHandler) OnKeyPress(key Keycode, duration uint32)                  {}
-func (d *DefaultCallbackHandler) OnCommand(command *Command)                               {}
-func (d *DefaultCallbackHandler) OnConfigurationChanged(config *Configuration)             {}
-func (d *DefaultCallbackHandler) OnAlert(alert Alert, param Parameter)                     {}
-func (d *DefaultCallbackHandler) OnMenuStateChanged(state MenuState) bool                  { return true }
-func (d *DefaultCallbackHandler) OnSourceActivated(address LogicalAddress, activated bool) {}
-
-// Global connection registry for callbacks
-var (
-	connections   = make(map[C.libcec_connection_t]*Connection)
-	connectionsMu sync.RWMutex
-)
-
-// Open creates a new CEC connection
-func Open(deviceName string, deviceType DeviceType) (*Connection, error) {
-	config := &Configuration{
-		DeviceName:        deviceName,
-		DeviceType:        deviceType,
-		PhysicalAddress:   0xFFFF, // Auto-detect
-		ClientVersion:     C.LIBCEC_VERSION_CURRENT,
-		TryLogicalAddress: LogicalAddressUnknown,
-	}
-	return OpenWithConfig(config)
-}
-
-// OpenWithConfig creates a new CEC connection with custom configuration
-func OpenWithConfig(config *Configuration) (*Connection, error) {
-	conn := &Connection{
-		config:    config,
-		callbacks: &DefaultCallbackHandler{},
-	}
-
-	// Create libcec configuration
-	cConfig := C.libcec_configuration{}
-	C.libcec_clear_configuration(&cConfig)
-
-	cDeviceName := C.CString(config.DeviceName)
-	defer C.free(unsafe.Pointer(cDeviceName))
-	C.strncpy(&cConfig.strDeviceName[0], cDeviceName, 13)
-
-	cConfig.deviceTypes.types[0] = C.cec_device_type(config.DeviceType)
-	cConfig.iPhysicalAddress = C.uint16_t(config.PhysicalAddress)
-	cConfig.baseDevice = C.cec_logical_address(config.BaseDevice)
-	cConfig.iHDMIPort = C.uint8_t(config.HDMIPort)
-	cConfig.clientVersion = C.uint32_t(config.ClientVersion)
-
-	// Create callbacks
-	callbacks := C.createCallbacks()
-	cConfig.callbacks = callbacks
-
-	// Initialize libcec
-	conn.handle = C.libcec_initialise(&cConfig)
-	if conn.handle == nil {
-		return nil, errors.New("failed to initialize libcec")
-	}
-
-	// Register connection for callbacks
-	connectionsMu.Lock()
-	connections[conn.handle] = conn
-	connectionsMu.Unlock()
-
-	conn.initialized = true
-	return conn, nil
-}
-
-// SetCallbackHandler sets the callback handler for events
-func (c *Connection) SetCallbackHandler(handler CallbackHandler) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.callbacks = handler
-}
-
-// FindAdapters lists available CEC adapters
+// FindAdapters lists available CEC adapters reachable from this libcec session.
 func (c *Connection) FindAdapters() ([]Adapter, error) {
+	if err := c.guard(); err != nil {
+		return nil, err
+	}
+	defer c.apiMu.Unlock()
+
 	var adapters [10]C.cec_adapter
 	count := C.libcec_find_adapters(c.handle, &adapters[0], 10, nil)
-
 	if count < 0 {
-		return nil, errors.New("failed to find adapters")
+		return nil, fmt.Errorf("%w: libcec_find_adapters", ErrLibcecCall)
 	}
-
-	result := make([]Adapter, count)
+	out := make([]Adapter, count)
 	for i := 0; i < int(count); i++ {
-		result[i] = Adapter{
+		out[i] = Adapter{
 			Path: C.GoString(&adapters[i].path[0]),
 			Comm: C.GoString(&adapters[i].comm[0]),
 		}
 	}
-
-	return result, nil
+	return out, nil
 }
 
-// OpenAdapter opens a connection to a specific adapter
+// OpenAdapter opens a connection to the given adapter path. If a previous
+// adapter session is still open, it is closed first.
 func (c *Connection) OpenAdapter(adapterPath string) error {
+	if err := c.guard(); err != nil {
+		return err
+	}
+	defer c.apiMu.Unlock()
+
 	cPath := C.CString(adapterPath)
 	defer C.free(unsafe.Pointer(cPath))
 
-	if C.libcec_open(c.handle, cPath, 5000) == 0 {
-		return errors.New("failed to open adapter")
-	}
-
-	return nil
-}
-
-// Close closes the CEC connection
-func (c *Connection) Close() error {
-	if !c.initialized {
-		return nil
-	}
-
-	connectionsMu.Lock()
-	delete(connections, c.handle)
-	connectionsMu.Unlock()
-
+	// libcec_open is idempotent in name but not always in behavior across
+	// versions; explicitly close any prior session first.
 	C.libcec_close(c.handle)
-	C.libcec_destroy(c.handle)
-	c.initialized = false
 
+	if C.libcec_open(c.handle, cPath, 5000) == 0 {
+		return fmt.Errorf("%w: libcec_open(%s)", ErrAdapterNotOpen, adapterPath)
+	}
 	return nil
 }
 
-// PowerOn powers on a device
+// PowerOn powers on a device. address must be 0..14.
 func (c *Connection) PowerOn(address LogicalAddress) error {
+	if !address.IsValid() {
+		return ErrInvalidLogicalAddress
+	}
+	if err := c.guard(); err != nil {
+		return err
+	}
+	defer c.apiMu.Unlock()
+
 	if C.libcec_power_on_devices(c.handle, C.cec_logical_address(address)) == 0 {
-		return fmt.Errorf("failed to power on device %d", address)
+		return fmt.Errorf("%w: power on %d", ErrLibcecCall, address)
 	}
 	return nil
 }
 
-// Standby puts a device in standby mode
+// Standby puts a device in standby mode. address must be 0..14.
 func (c *Connection) Standby(address LogicalAddress) error {
+	if !address.IsValid() {
+		return ErrInvalidLogicalAddress
+	}
+	if err := c.guard(); err != nil {
+		return err
+	}
+	defer c.apiMu.Unlock()
+
 	if C.libcec_standby_devices(c.handle, C.cec_logical_address(address)) == 0 {
-		return fmt.Errorf("failed to standby device %d", address)
+		return fmt.Errorf("%w: standby %d", ErrLibcecCall, address)
 	}
 	return nil
 }
 
-// SetActiveSource sets the active source
+// SetActiveSource declares the local device of the given type to be active.
 func (c *Connection) SetActiveSource(deviceType DeviceType) error {
+	if err := c.guard(); err != nil {
+		return err
+	}
+	defer c.apiMu.Unlock()
 	if C.libcec_set_active_source(c.handle, C.cec_device_type(deviceType)) == 0 {
-		return errors.New("failed to set active source")
+		return fmt.Errorf("%w: set active source", ErrLibcecCall)
 	}
 	return nil
 }
 
-// SetInactiveView marks as inactive view
+// SetInactiveView marks the local device as inactive view.
 func (c *Connection) SetInactiveView() error {
+	if err := c.guard(); err != nil {
+		return err
+	}
+	defer c.apiMu.Unlock()
 	if C.libcec_set_inactive_view(c.handle) == 0 {
-		return errors.New("failed to set inactive view")
+		return fmt.Errorf("%w: set inactive view", ErrLibcecCall)
 	}
 	return nil
 }
 
-// VolumeUp increases volume
+// VolumeUp increases the system audio volume.
 func (c *Connection) VolumeUp(sendRelease bool) error {
-	release := C.int(0)
-	if sendRelease {
-		release = 1
+	if err := c.guard(); err != nil {
+		return err
 	}
-	if C.libcec_volume_up(c.handle, release) == 0 {
-		return errors.New("failed to increase volume")
+	defer c.apiMu.Unlock()
+	rel := C.int(0)
+	if sendRelease {
+		rel = 1
+	}
+	if C.libcec_volume_up(c.handle, rel) == 0 {
+		return fmt.Errorf("%w: volume up", ErrLibcecCall)
 	}
 	return nil
 }
 
-// VolumeDown decreases volume
+// VolumeDown decreases the system audio volume.
 func (c *Connection) VolumeDown(sendRelease bool) error {
-	release := C.int(0)
+	if err := c.guard(); err != nil {
+		return err
+	}
+	defer c.apiMu.Unlock()
+	rel := C.int(0)
 	if sendRelease {
-		release = 1
+		rel = 1
 	}
-	if C.libcec_volume_down(c.handle, release) == 0 {
-		return errors.New("failed to decrease volume")
+	if C.libcec_volume_down(c.handle, rel) == 0 {
+		return fmt.Errorf("%w: volume down", ErrLibcecCall)
 	}
 	return nil
 }
 
-// AudioToggleMute toggles mute
+// AudioToggleMute toggles the audio mute state.
 func (c *Connection) AudioToggleMute() error {
+	if err := c.guard(); err != nil {
+		return err
+	}
+	defer c.apiMu.Unlock()
 	if C.libcec_audio_toggle_mute(c.handle) == 0 {
-		return errors.New("failed to toggle mute")
+		return fmt.Errorf("%w: audio toggle mute", ErrLibcecCall)
 	}
 	return nil
 }
 
-// AudioMute mutes audio
+// AudioMute mutes audio.
 func (c *Connection) AudioMute() error {
+	if err := c.guard(); err != nil {
+		return err
+	}
+	defer c.apiMu.Unlock()
 	if C.libcec_audio_mute(c.handle) == 0 {
-		return errors.New("failed to mute audio")
+		return fmt.Errorf("%w: audio mute", ErrLibcecCall)
 	}
 	return nil
 }
 
-// AudioUnmute unmutes audio
+// AudioUnmute unmutes audio.
 func (c *Connection) AudioUnmute() error {
+	if err := c.guard(); err != nil {
+		return err
+	}
+	defer c.apiMu.Unlock()
 	if C.libcec_audio_unmute(c.handle) == 0 {
-		return errors.New("failed to unmute audio")
+		return fmt.Errorf("%w: audio unmute", ErrLibcecCall)
 	}
 	return nil
 }
 
-// GetDevicePowerStatus gets the power status of a device
+// GetDevicePowerStatus queries a device's power status.
+// Returns PowerStatusUnknown with a wrapped ErrLibcecCall when the bus does
+// not respond.
 func (c *Connection) GetDevicePowerStatus(address LogicalAddress) (PowerStatus, error) {
+	if !address.IsValid() {
+		return PowerStatusUnknown, ErrInvalidLogicalAddress
+	}
+	if err := c.guard(); err != nil {
+		return PowerStatusUnknown, err
+	}
+	defer c.apiMu.Unlock()
 	status := C.libcec_get_device_power_status(c.handle, C.cec_logical_address(address))
 	if status == C.CEC_POWER_STATUS_UNKNOWN {
-		return PowerStatusUnknown, errors.New("failed to get power status")
+		return PowerStatusUnknown, fmt.Errorf("%w: get power status %d", ErrLibcecCall, address)
 	}
 	return PowerStatus(status), nil
 }
 
-// GetActiveSource gets the active source
+// GetActiveSource returns the logical address that currently claims the
+// active-source role. Returns ErrNoActiveSource if no device claims it.
 func (c *Connection) GetActiveSource() (LogicalAddress, error) {
+	if err := c.guard(); err != nil {
+		return LogicalAddressUnknown, err
+	}
+	defer c.apiMu.Unlock()
 	addr := C.libcec_get_active_source(c.handle)
-	return LogicalAddress(addr), nil
+	la := LogicalAddress(uint8(addr))
+	if !la.IsValid() {
+		return la, ErrNoActiveSource
+	}
+	return la, nil
 }
 
-// IsActiveSource checks if the specified device is the active source
+// IsActiveSource reports whether the given device is the current active source.
 func (c *Connection) IsActiveSource(address LogicalAddress) bool {
+	if !address.IsValid() {
+		return false
+	}
+	if err := c.guard(); err != nil {
+		return false
+	}
+	defer c.apiMu.Unlock()
 	return C.libcec_is_active_source(c.handle, C.cec_logical_address(address)) == 1
 }
 
-// GetDeviceVendorId gets the vendor ID of a device
+// GetDeviceVendorId queries a device's vendor ID. Returns 0 + wrapped error
+// when the device does not respond.
 func (c *Connection) GetDeviceVendorId(address LogicalAddress) (uint64, error) {
-	vendorId := C.libcec_get_device_vendor_id(c.handle, C.cec_logical_address(address))
-	if vendorId == C.CEC_VENDOR_UNKNOWN {
-		return 0, errors.New("failed to get vendor ID")
+	if !address.IsValid() {
+		return 0, ErrInvalidLogicalAddress
 	}
-	return uint64(vendorId), nil
+	if err := c.guard(); err != nil {
+		return 0, err
+	}
+	defer c.apiMu.Unlock()
+	v := C.libcec_get_device_vendor_id(c.handle, C.cec_logical_address(address))
+	if v == C.CEC_VENDOR_UNKNOWN {
+		return 0, fmt.Errorf("%w: vendor id %d", ErrLibcecCall, address)
+	}
+	return uint64(v), nil
 }
 
-// GetDevicePhysicalAddress gets the physical address of a device
+// GetDevicePhysicalAddress queries a device's physical (HDMI tree) address.
 func (c *Connection) GetDevicePhysicalAddress(address LogicalAddress) (uint16, error) {
-	addr := C.libcec_get_device_physical_address(c.handle, C.cec_logical_address(address))
-	if addr == C.CEC_INVALID_PHYSICAL_ADDRESS {
-		return 0, errors.New("failed to get physical address")
+	if !address.IsValid() {
+		return 0, ErrInvalidLogicalAddress
 	}
-	return uint16(addr), nil
+	if err := c.guard(); err != nil {
+		return 0, err
+	}
+	defer c.apiMu.Unlock()
+	a := C.libcec_get_device_physical_address(c.handle, C.cec_logical_address(address))
+	if a == C.CEC_INVALID_PHYSICAL_ADDRESS {
+		return 0, fmt.Errorf("%w: physical address %d", ErrLibcecCall, address)
+	}
+	return uint16(a), nil
 }
 
-// GetDeviceOSDName gets the OSD name of a device
+// GetDeviceOSDName queries a device's OSD name.
 func (c *Connection) GetDeviceOSDName(address LogicalAddress) (string, error) {
+	if !address.IsValid() {
+		return "", ErrInvalidLogicalAddress
+	}
+	if err := c.guard(); err != nil {
+		return "", err
+	}
+	defer c.apiMu.Unlock()
 	var name [14]C.char
 	if C.libcec_get_device_osd_name(c.handle, C.cec_logical_address(address), &name[0]) == 0 {
-		return "", errors.New("failed to get OSD name")
+		return "", fmt.Errorf("%w: osd name %d", ErrLibcecCall, address)
 	}
 	return C.GoString(&name[0]), nil
 }
 
-// GetDeviceMenuLanguage gets the menu language of a device
+// GetDeviceMenuLanguage queries a device's menu language (ISO 639-2).
 func (c *Connection) GetDeviceMenuLanguage(address LogicalAddress) (string, error) {
+	if !address.IsValid() {
+		return "", ErrInvalidLogicalAddress
+	}
+	if err := c.guard(); err != nil {
+		return "", err
+	}
+	defer c.apiMu.Unlock()
 	var lang [4]C.char
 	if C.libcec_get_device_menu_language(c.handle, C.cec_logical_address(address), &lang[0]) == 0 {
-		return "", errors.New("failed to get menu language")
+		return "", fmt.Errorf("%w: menu lang %d", ErrLibcecCall, address)
 	}
 	return C.GoString(&lang[0]), nil
 }
 
-// GetDeviceCecVersion gets the CEC version of a device
+// GetDeviceCecVersion queries a device's CEC spec version.
 func (c *Connection) GetDeviceCecVersion(address LogicalAddress) (CECVersion, error) {
-	version := C.libcec_get_device_cec_version(c.handle, C.cec_logical_address(address))
-	if version == C.CEC_VERSION_UNKNOWN {
-		return CECVersionUnknown, errors.New("failed to get CEC version")
+	if !address.IsValid() {
+		return CECVersionUnknown, ErrInvalidLogicalAddress
 	}
-	return CECVersion(version), nil
+	if err := c.guard(); err != nil {
+		return CECVersionUnknown, err
+	}
+	defer c.apiMu.Unlock()
+	v := C.libcec_get_device_cec_version(c.handle, C.cec_logical_address(address))
+	if v == C.CEC_VERSION_UNKNOWN {
+		return CECVersionUnknown, fmt.Errorf("%w: cec version %d", ErrLibcecCall, address)
+	}
+	return CECVersion(v), nil
 }
 
-// GetActiveDevices returns a list of active devices
+// GetActiveDevices returns the logical addresses of devices that libcec
+// considers "active" on the bus.
 func (c *Connection) GetActiveDevices() []LogicalAddress {
-	addresses := C.libcec_get_active_devices(c.handle)
-
-	var result []LogicalAddress
+	if err := c.guard(); err != nil {
+		return nil
+	}
+	defer c.apiMu.Unlock()
+	addrs := C.libcec_get_active_devices(c.handle)
+	out := make([]LogicalAddress, 0, 16)
 	for i := 0; i < 16; i++ {
-		if addresses.addresses[i] != 0 {
-			result = append(result, LogicalAddress(i))
+		if addrs.addresses[i] != 0 {
+			out = append(out, LogicalAddress(i))
 		}
 	}
-	return result
+	return out
 }
 
-// IsActiveDevice checks if a device is active
+// IsActiveDevice reports whether libcec considers the given device active.
 func (c *Connection) IsActiveDevice(address LogicalAddress) bool {
+	if !address.IsValid() {
+		return false
+	}
+	if err := c.guard(); err != nil {
+		return false
+	}
+	defer c.apiMu.Unlock()
 	return C.libcec_is_active_device(c.handle, C.cec_logical_address(address)) == 1
 }
 
-// Transmit sends a raw CEC command
-func (c *Connection) Transmit(command *Command) error {
+// Transmit sends a raw CEC command frame.
+func (c *Connection) Transmit(cmd *Command) error {
+	if cmd == nil {
+		return fmt.Errorf("%w: nil command", ErrTransmitFailed)
+	}
+	if err := c.guard(); err != nil {
+		return err
+	}
+	defer c.apiMu.Unlock()
+
 	cCmd := C.cec_command{}
-	cCmd.initiator = C.cec_logical_address(command.Initiator)
-	cCmd.destination = C.cec_logical_address(command.Destination)
-	cCmd.opcode = C.cec_opcode(command.Opcode)
-	cCmd.opcode_set = 1
-	cCmd.parameters.size = C.uint8_t(len(command.Parameters))
-
-	for i, param := range command.Parameters {
-		cCmd.parameters.data[i] = C.uint8_t(param)
+	cCmd.initiator = C.cec_logical_address(cmd.Initiator)
+	cCmd.destination = C.cec_logical_address(cmd.Destination)
+	cCmd.opcode = C.cec_opcode(cmd.Opcode)
+	if cmd.OpcodeSet {
+		cCmd.opcode_set = 1
 	}
-
+	cCmd.parameters.size = C.uint8_t(len(cmd.Parameters))
+	for i, p := range cmd.Parameters {
+		cCmd.parameters.data[i] = C.uint8_t(p)
+	}
 	if C.libcec_transmit(c.handle, &cCmd) == 0 {
-		return errors.New("failed to transmit command")
+		return ErrTransmitFailed
 	}
 	return nil
 }
 
-// SendKeypress sends a keypress
+// SendKeypress sends a remote-control key press to a device.
+// If wait is true, the call blocks until the bus acknowledges.
 func (c *Connection) SendKeypress(address LogicalAddress, key Keycode, wait bool) error {
-	waitVal := C.int(0)
-	if wait {
-		waitVal = 1
+	if !address.IsValid() {
+		return ErrInvalidLogicalAddress
 	}
-
+	if err := c.guard(); err != nil {
+		return err
+	}
+	defer c.apiMu.Unlock()
+	w := C.int(0)
+	if wait {
+		w = 1
+	}
 	if C.libcec_send_keypress(c.handle, C.cec_logical_address(address),
-		C.cec_user_control_code(key), waitVal) == 0 {
-		return errors.New("failed to send keypress")
+		C.cec_user_control_code(key), w) == 0 {
+		return fmt.Errorf("%w: send keypress %d", ErrLibcecCall, address)
 	}
 	return nil
 }
 
-// SendKeyRelease sends a key release
+// SendKeyRelease sends a remote-control key release to a device.
 func (c *Connection) SendKeyRelease(address LogicalAddress, wait bool) error {
-	waitVal := C.int(0)
-	if wait {
-		waitVal = 1
+	if !address.IsValid() {
+		return ErrInvalidLogicalAddress
 	}
-
-	if C.libcec_send_key_release(c.handle, C.cec_logical_address(address), waitVal) == 0 {
-		return errors.New("failed to send key release")
+	if err := c.guard(); err != nil {
+		return err
+	}
+	defer c.apiMu.Unlock()
+	w := C.int(0)
+	if wait {
+		w = 1
+	}
+	if C.libcec_send_key_release(c.handle, C.cec_logical_address(address), w) == 0 {
+		return fmt.Errorf("%w: send key release %d", ErrLibcecCall, address)
 	}
 	return nil
 }
 
-// SetOSDString sets an OSD string
+// SetOSDString displays an OSD string on the given device.
 func (c *Connection) SetOSDString(address LogicalAddress, duration DisplayControl, message string) error {
+	if !address.IsValid() {
+		return ErrInvalidLogicalAddress
+	}
+	if err := c.guard(); err != nil {
+		return err
+	}
+	defer c.apiMu.Unlock()
 	cMsg := C.CString(message)
 	defer C.free(unsafe.Pointer(cMsg))
-
 	if C.libcec_set_osd_string(c.handle, C.cec_logical_address(address),
 		C.cec_display_control(duration), cMsg) == 0 {
-		return errors.New("failed to set OSD string")
+		return fmt.Errorf("%w: set osd string", ErrLibcecCall)
 	}
 	return nil
 }
 
-// SwitchMonitoring enables/disables monitoring mode
+// SwitchMonitoring toggles libcec monitoring mode.
 func (c *Connection) SwitchMonitoring(enable bool) error {
-	val := C.int(0)
-	if enable {
-		val = 1
+	if err := c.guard(); err != nil {
+		return err
 	}
-
-	if C.libcec_switch_monitoring(c.handle, val) == 0 {
-		return errors.New("failed to switch monitoring mode")
+	defer c.apiMu.Unlock()
+	v := C.int(0)
+	if enable {
+		v = 1
+	}
+	if C.libcec_switch_monitoring(c.handle, v) == 0 {
+		return fmt.Errorf("%w: switch monitoring", ErrLibcecCall)
 	}
 	return nil
 }
 
-// GetLibInfo returns libcec version information
+// GetLibInfo returns libcec version information as a printable string.
 func (c *Connection) GetLibInfo() string {
+	if err := c.guard(); err != nil {
+		return ""
+	}
+	defer c.apiMu.Unlock()
 	return C.GoString(C.libcec_get_lib_info(c.handle))
 }
 
-// SetConfiguration updates the configuration
-func (c *Connection) SetConfiguration(config *Configuration) error {
+// SetConfiguration replaces the running libcec configuration. It re-attaches
+// the cec package's internal callback table so events keep flowing after the
+// swap. cfg.DeviceName, DeviceType, PhysicalAddress, BaseDevice, HDMIPort and
+// ClientVersion are honored.
+func (c *Connection) SetConfiguration(cfg *Configuration) error {
+	if cfg == nil {
+		return fmt.Errorf("cec: nil Configuration")
+	}
+	if err := c.guard(); err != nil {
+		return err
+	}
+	defer c.apiMu.Unlock()
+
 	cConfig := C.libcec_configuration{}
 	C.libcec_clear_configuration(&cConfig)
 
-	cDeviceName := C.CString(config.DeviceName)
-	defer C.free(unsafe.Pointer(cDeviceName))
-	C.strncpy(&cConfig.strDeviceName[0], cDeviceName, 13)
+	cName := C.CString(cfg.DeviceName)
+	defer C.free(unsafe.Pointer(cName))
+	C.strncpy(&cConfig.strDeviceName[0], cName, C.LIBCEC_OSD_NAME_SIZE-1)
 
-	cConfig.deviceTypes.types[0] = C.cec_device_type(config.DeviceType)
-	cConfig.iPhysicalAddress = C.uint16_t(config.PhysicalAddress)
-	cConfig.baseDevice = C.cec_logical_address(config.BaseDevice)
-	cConfig.iHDMIPort = C.uint8_t(config.HDMIPort)
-	cConfig.clientVersion = C.uint32_t(config.ClientVersion)
+	cConfig.deviceTypes.types[0] = C.cec_device_type(cfg.DeviceType)
+	cConfig.iPhysicalAddress = C.uint16_t(cfg.PhysicalAddress)
+	cConfig.baseDevice = C.cec_logical_address(cfg.BaseDevice)
+	cConfig.iHDMIPort = C.uint8_t(cfg.HDMIPort)
+	cConfig.clientVersion = C.uint32_t(cfg.ClientVersion)
+
+	C.cec_install_callbacks(&cConfig, C.uintptr_t(c.cgoHandle))
 
 	if C.libcec_set_configuration(c.handle, &cConfig) == 0 {
-		return errors.New("failed to set configuration")
+		return fmt.Errorf("%w: set configuration", ErrLibcecCall)
 	}
-
-	c.config = config
+	c.config = cfg
 	return nil
 }
 
-// GetCurrentConfiguration retrieves the current configuration
+// GetCurrentConfiguration retrieves the running libcec configuration.
 func (c *Connection) GetCurrentConfiguration() (*Configuration, error) {
+	if err := c.guard(); err != nil {
+		return nil, err
+	}
+	defer c.apiMu.Unlock()
 	var cConfig C.libcec_configuration
 	if C.libcec_get_current_configuration(c.handle, &cConfig) == 0 {
-		return nil, errors.New("failed to get current configuration")
+		return nil, fmt.Errorf("%w: get current configuration", ErrLibcecCall)
 	}
-
-	config := &Configuration{
+	return &Configuration{
 		DeviceName:      C.GoString(&cConfig.strDeviceName[0]),
 		DeviceType:      DeviceType(cConfig.deviceTypes.types[0]),
 		PhysicalAddress: uint16(cConfig.iPhysicalAddress),
@@ -471,65 +501,99 @@ func (c *Connection) GetCurrentConfiguration() (*Configuration, error) {
 		HDMIPort:        uint8(cConfig.iHDMIPort),
 		ClientVersion:   uint32(cConfig.clientVersion),
 		ServerVersion:   uint32(cConfig.serverVersion),
-	}
-
-	return config, nil
+	}, nil
 }
 
 // GetAudioStatus returns the current audio status from the audio system.
-// Returns volume level (0-100) and muted state.
-func (c *Connection) GetAudioStatus() (volume uint8, muted bool, err error) {
+// rawStatus is the full byte from libcec_audio_get_status (bit7 = muted,
+// bits0-6 = level). Volume may exceed 100 when no audio system is present.
+func (c *Connection) GetAudioStatus() (volume uint8, muted bool, rawStatus uint8) {
+	if err := c.guard(); err != nil {
+		return 0, false, 0
+	}
+	defer c.apiMu.Unlock()
 	status := C.libcec_audio_get_status(c.handle)
-	// Return value is a uint8: bit 7 = muted, bits 0-6 = volume percentage.
-	// A return of 0 with no audio system present is indistinguishable from
-	// "volume 0, not muted", so we just return what libcec gives us.
+	rawStatus = uint8(status)
 	muted = (status & 0x80) != 0
 	volume = uint8(status & 0x7F)
-	return volume, muted, nil
+	return volume, muted, rawStatus
 }
 
-// PollDevice sends a POLL message to check if a device is present on the bus.
-// This is much faster than GetDeviceInfo for a simple presence check.
+// PollDevice sends a CEC POLL message to test whether a device is present.
+// This is much faster than a full GetDeviceInfo and does not require an OSD
+// name response.
 func (c *Connection) PollDevice(address LogicalAddress) bool {
+	if !address.IsValid() {
+		return false
+	}
+	if err := c.guard(); err != nil {
+		return false
+	}
+	defer c.apiMu.Unlock()
 	return C.libcec_poll_device(c.handle, C.cec_logical_address(address)) == 1
 }
 
 // SetHDMIPort tells libcec to switch input on the base device to the given
-// HDMI port. baseDevice is typically LogicalAddressTV (0). This uses libcec's
-// built-in protocol handling which is more reliable than raw commands.
+// HDMI port. baseDevice is typically LogicalAddressTV (0).
 func (c *Connection) SetHDMIPort(baseDevice LogicalAddress, port uint8) error {
+	if port < 1 || port > 15 {
+		return ErrInvalidHDMIPort
+	}
+	if err := c.guard(); err != nil {
+		return err
+	}
+	defer c.apiMu.Unlock()
 	if C.libcec_set_hdmi_port(c.handle, C.cec_logical_address(baseDevice), C.uint8_t(port)) == 0 {
-		return errors.New("failed to set HDMI port")
+		return fmt.Errorf("%w: set hdmi port %d", ErrLibcecCall, port)
 	}
 	return nil
 }
 
-// RescanDevices rescans for devices
-func (c *Connection) RescanDevices() error {
+// RescanDevices asks libcec to re-discover devices on the bus. This call does
+// not sleep; pass settle if you need to wait for responses to arrive
+// (typical: 1-2s for cold buses, 0 for hot buses where you'll observe the
+// updates via Events).
+func (c *Connection) RescanDevices(settle time.Duration) error {
+	if err := c.guard(); err != nil {
+		return err
+	}
 	C.libcec_rescan_devices(c.handle)
-	// Give devices time to respond
-	time.Sleep(1 * time.Second)
+	c.apiMu.Unlock()
+
+	if settle > 0 {
+		// Settle outside the lock so other libcec calls can proceed.
+		t := time.NewTimer(settle)
+		defer t.Stop()
+		<-t.C
+	}
 	return nil
 }
 
-// GetLogicalAddresses returns all logical addresses currently assigned to this adapter.
-// It inspects the cec_logical_addresses.addresses array and returns one entry
-// per non-zero slot (0-15). If no entries are set but a primary address is
-// known, it returns that single primary address.
+// GetLogicalAddresses returns all logical addresses currently assigned to
+// this adapter. If libcec reports an empty bitmask but a primary address is
+// known, that single primary address is returned.
 func (c *Connection) GetLogicalAddresses() []LogicalAddress {
-	addresses := C.libcec_get_logical_addresses(c.handle)
-
-	var result []LogicalAddress
+	if err := c.guard(); err != nil {
+		return nil
+	}
+	defer c.apiMu.Unlock()
+	addrs := C.libcec_get_logical_addresses(c.handle)
+	out := make([]LogicalAddress, 0, 16)
 	for i := 0; i < 16; i++ {
-		if addresses.addresses[i] != 0 {
-			result = append(result, LogicalAddress(i))
+		if addrs.addresses[i] != 0 {
+			out = append(out, LogicalAddress(i))
 		}
 	}
-
-	// Fallback: if no bit is set but a primary logical address is known, return it.
-	if len(result) == 0 && addresses.primary != C.CECDEVICE_UNKNOWN {
-		result = append(result, LogicalAddress(addresses.primary))
+	if len(out) == 0 && addrs.primary != C.CECDEVICE_UNKNOWN {
+		out = append(out, LogicalAddress(uint8(addrs.primary)))
 	}
+	return out
+}
 
-	return result
+// pingTV is the cheapest health check we can do; used by reconnect supervisors.
+// It returns ErrClosed or ErrLibcecCall on failure.
+func (c *Connection) pingTV(ctx context.Context) error {
+	_ = ctx
+	_, err := c.GetDevicePowerStatus(LogicalAddressTV)
+	return err
 }

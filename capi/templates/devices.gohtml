@@ -1,0 +1,25 @@
+{{define "devices"}}
+{{if .Message}}<p style="font-size:.8rem;color:var(--muted);margin-bottom:8px">{{.Message}}</p>{{end}}
+{{if .Devices}}
+<div class="device-grid">
+  {{range .Devices}}
+  <div class="dev-card{{if .IsActiveSource}} active-src{{end}}">
+    <div class="dev-name">{{.OSDName}} {{if .IsOwn}}<span class="badge off" style="font-size:.65rem">this adapter</span>{{end}}</div>
+    <div class="dev-meta">{{.AddressName}} · {{.PhysicalAddress}} · {{.PowerStatus}}</div>
+    <div class="dev-actions">
+      <button type="button" class="sm" hx-post="/ui/action/power_on?addr={{.LogicalAddress}}" hx-target="#action-flash" hx-swap="innerHTML">On</button>
+      <button type="button" class="sm" hx-post="/ui/action/power_off?addr={{.LogicalAddress}}" hx-target="#action-flash" hx-swap="innerHTML">Standby</button>
+      <button type="button" class="sm" hx-get="/ui/fragment/device_power?addr={{.LogicalAddress}}" hx-target="#action-flash" hx-swap="innerHTML">Status</button>
+    </div>
+    <hr class="dev-actions-divider" />
+    <div class="dev-actions-label">Input / source</div>
+    <div class="dev-actions">
+      <button type="button" class="sm" hx-post="/ui/action/set_source?addr={{.LogicalAddress}}" hx-target="#action-flash" hx-swap="innerHTML">Activate</button>
+    </div>
+  </div>
+  {{end}}
+</div>
+{{else}}
+<p style="color:var(--muted)">No devices in cache yet. Use <strong>Rescan bus</strong> (may take up to two minutes).</p>
+{{end}}
+{{end}}

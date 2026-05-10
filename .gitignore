@@ -1,5 +1,6 @@
 # Build output
 /capi-server
+/dist/
 *.o
 *.a
 *.so
@@ -18,3 +19,4 @@ vendor/
 .vscode/
 *.swp
 .DS_Store
+.env

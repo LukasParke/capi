@@ -1,5 +1,5 @@
 [Unit]
-Description=CEC HTTP Bridge Service
+Description=CEC HTTP/MQTT Bridge
 Documentation=https://github.com/LukasParke/capi
 After=network-online.target
 Wants=network-online.target
@@ -10,22 +10,43 @@ StartLimitBurst=5
 Type=simple
 User=capi
 Group=capi
-SupplementaryGroups=dialout
+SupplementaryGroups=dialout video
 WorkingDirectory=/opt/capi
 
-# Main service command
-ExecStart=/opt/capi/capi -bind :8080 -name "CEC HTTP Bridge"
+# Optional: place CAPI_EXTRA_FLAGS=... in /etc/default/capi to add CLI
+# arguments without overriding the unit (e.g. -mqtt-broker tcp://...).
+# Marked with a leading '-' so the unit still starts when the file is absent.
+EnvironmentFile=-/etc/default/capi
 
-# Restart policy
+ExecStart=/opt/capi/capi -bind :8080 -name "CEC HTTP Bridge" $CAPI_EXTRA_FLAGS
+
 Restart=on-failure
 RestartSec=10
 
-# Security settings
+# Sandboxing
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/dev /opt/capi
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+RestrictNamespaces=true
+
+# Writable paths: /opt/capi for config.json + self-update binary swap.
+# /dev is needed for the CEC adapter; we also explicitly grant access to the
+# common adapter device classes so the sandbox doesn't block them.
+ReadWritePaths=/opt/capi
+DeviceAllow=char-cec rw
+DeviceAllow=/dev/ttyACM0 rw
+DeviceAllow=/dev/ttyACM1 rw
+DeviceAllow=/dev/ttyUSB0 rw
+DeviceAllow=/dev/ttyUSB1 rw
 
 # Logging
 StandardOutput=journal

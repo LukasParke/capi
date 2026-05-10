@@ -1,0 +1,107 @@
+{{define "layout"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CEC Control</title>
+  <link rel="stylesheet" href="/ui/static/style.css">
+  <script src="/ui/static/htmx.min.js"></script>
+</head>
+<body>
+  <h1>CEC Control
+    <span id="health-strip"
+          hx-get="/ui/fragment/health"
+          hx-trigger="load, every 12s"
+          hx-swap="innerHTML"
+          hx-disinherit="*">…</span>
+    <span class="badge warn" style="margin-left:6px;font-size:.7rem">v {{.Version}}</span>
+  </h1>
+
+  <div id="bus-banner"
+       hx-get="/ui/fragment/bus_banner"
+       hx-trigger="load, every 8s, refresh from:body"
+       hx-swap="innerHTML"></div>
+
+  <div class="grid">
+    <div class="card full">
+      <h2>Devices on CEC Bus</h2>
+      <div class="btn-row" style="margin-bottom:10px">
+        <button type="button"
+                hx-get="/ui/fragment/devices"
+                hx-target="#devices-panel"
+                hx-swap="innerHTML"
+                hx-indicator="#dev-ind">Refresh</button>
+        <button type="button"
+                hx-get="/ui/fragment/devices?rescan=1"
+                hx-target="#devices-panel"
+                hx-swap="innerHTML"
+                hx-timeout="120000"
+                hx-indicator="#dev-ind">Rescan bus</button>
+        <button type="button" class="sm"
+                hx-post="/ui/action/deep_scan"
+                hx-target="#action-flash"
+                hx-swap="innerHTML">Deep scan</button>
+        <span id="dev-ind" class="htmx-indicator" style="font-size:.8rem;color:var(--muted)">Working…</span>
+      </div>
+      <div id="devices-panel"
+           hx-get="/ui/fragment/devices"
+           hx-trigger="load, refresh from:body"
+           hx-swap="innerHTML"
+           hx-timeout="120000"></div>
+    </div>
+
+    <div class="card" id="source-card"
+         hx-get="/ui/fragment/source_panel"
+         hx-trigger="load, refresh from:body"
+         hx-swap="innerHTML"></div>
+
+    <div class="card" id="topology-card"
+         hx-get="/ui/fragment/topology_hdmi"
+         hx-trigger="load, refresh from:body"
+         hx-swap="innerHTML"></div>
+
+    <div class="card" id="volume-card"
+         hx-get="/ui/fragment/volume_panel"
+         hx-trigger="load, every 10s, refresh from:body"
+         hx-swap="innerHTML"></div>
+
+    <div class="card" id="nav-card"
+         hx-get="/ui/fragment/nav_panel"
+         hx-trigger="load, refresh from:body"
+         hx-swap="innerHTML"></div>
+
+    <div class="card full" id="mqtt-card"
+         hx-get="/ui/fragment/mqtt_panel"
+         hx-trigger="load"
+         hx-swap="innerHTML"></div>
+
+    <div class="card full" hx-ws="connect:/api/events/ws">
+      <h2>Live bus (WebSocket)</h2>
+      <p style="font-size:.75rem;color:var(--muted);margin-bottom:6px">
+        Pushes JSON lines and refreshes the bus banner, devices, source, and topology via
+        <code>hx-ws</code> out-of-band swaps. Falls back to manual refresh if the socket is down.
+      </p>
+      <pre id="ws-live-feed" class="sse-feed"></pre>
+    </div>
+
+    <div class="card full">
+      <h2>Logs</h2>
+      <div class="btn-row">
+        <button type="button"
+                hx-get="/ui/fragment/logs"
+                hx-target="#logs-panel"
+                hx-swap="innerHTML">Refresh logs</button>
+      </div>
+      <div id="logs-panel"
+           hx-get="/ui/fragment/logs"
+           hx-trigger="load"
+           hx-swap="innerHTML"></div>
+    </div>
+  </div>
+
+  <div id="action-flash" class="result" style="margin-top:12px"></div>
+  <div id="toast" class="toast"></div>
+</body>
+</html>
+{{end}}

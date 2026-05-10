@@ -1,0 +1,11 @@
+{{define "logs"}}
+<div class="log-box">
+  {{if .Logs}}
+  {{range .Logs}}
+  <div class="log-line lvl-{{.Level}}"><span style="color:var(--muted)">{{.Timestamp.Format "15:04:05"}}</span> <span class="badge off" style="font-size:.65rem">{{.Level}}</span> {{.Message}}</div>
+  {{end}}
+  {{else}}
+  <p style="color:var(--muted)">No log lines yet.</p>
+  {{end}}
+</div>
+{{end}}

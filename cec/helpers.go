@@ -1,253 +1,368 @@
 package cec
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 )
 
-// Helper functions for common operations
+// DeviceInfoErrors collects the per-field errors encountered while building
+// a Device with GetDeviceInfo. Use errors.As to inspect from the returned
+// error from GetDeviceInfo.
+type DeviceInfoErrors struct {
+	PhysicalAddress error
+	VendorID        error
+	CECVersion      error
+	PowerStatus     error
+	OSDName         error
+	MenuLanguage    error
+}
 
-// GetDeviceInfo retrieves comprehensive information about a device
+// Any reports whether at least one sub-query failed.
+func (d DeviceInfoErrors) Any() bool {
+	return d.PhysicalAddress != nil || d.VendorID != nil || d.CECVersion != nil ||
+		d.PowerStatus != nil || d.OSDName != nil || d.MenuLanguage != nil
+}
+
+// All reports whether every sub-query failed.
+func (d DeviceInfoErrors) All() bool {
+	return d.PhysicalAddress != nil && d.VendorID != nil && d.CECVersion != nil &&
+		d.PowerStatus != nil && d.OSDName != nil && d.MenuLanguage != nil
+}
+
+func (d DeviceInfoErrors) Error() string {
+	parts := []string{}
+	if d.PhysicalAddress != nil {
+		parts = append(parts, "physical:"+d.PhysicalAddress.Error())
+	}
+	if d.VendorID != nil {
+		parts = append(parts, "vendor:"+d.VendorID.Error())
+	}
+	if d.CECVersion != nil {
+		parts = append(parts, "cec_version:"+d.CECVersion.Error())
+	}
+	if d.PowerStatus != nil {
+		parts = append(parts, "power:"+d.PowerStatus.Error())
+	}
+	if d.OSDName != nil {
+		parts = append(parts, "osd:"+d.OSDName.Error())
+	}
+	if d.MenuLanguage != nil {
+		parts = append(parts, "menu_lang:"+d.MenuLanguage.Error())
+	}
+	if len(parts) == 0 {
+		return "cec: device info: <no errors>"
+	}
+	return "cec: device info: " + strings.Join(parts, ", ")
+}
+
+// GetDeviceInfo retrieves comprehensive information about a device. The
+// returned Device is always non-nil; missing fields keep their zero value.
+// The returned error is non-nil iff every sub-query failed (i.e. the device
+// is unresponsive). Partial failures are surfaced via DeviceInfoErrors which
+// callers may inspect with errors.As.
 func (c *Connection) GetDeviceInfo(address LogicalAddress) (*Device, error) {
-	device := &Device{
+	dev := &Device{
 		LogicalAddress: address,
 		IsActive:       c.IsActiveDevice(address),
 		IsActiveSource: c.IsActiveSource(address),
 	}
+	var errs DeviceInfoErrors
 
-	// Get physical address
-	if physAddr, err := c.GetDevicePhysicalAddress(address); err == nil {
-		device.PhysicalAddress = physAddr
+	if v, err := c.GetDevicePhysicalAddress(address); err == nil {
+		dev.PhysicalAddress = v
+	} else {
+		errs.PhysicalAddress = err
+	}
+	if v, err := c.GetDeviceVendorId(address); err == nil {
+		dev.VendorID = v
+	} else {
+		errs.VendorID = err
+	}
+	if v, err := c.GetDeviceCecVersion(address); err == nil {
+		dev.CECVersion = v
+	} else {
+		errs.CECVersion = err
+	}
+	if v, err := c.GetDevicePowerStatus(address); err == nil {
+		dev.PowerStatus = v
+	} else {
+		errs.PowerStatus = err
+	}
+	if v, err := c.GetDeviceOSDName(address); err == nil {
+		dev.OSDName = v
+	} else {
+		errs.OSDName = err
+	}
+	if v, err := c.GetDeviceMenuLanguage(address); err == nil {
+		dev.MenuLanguage = v
+	} else {
+		errs.MenuLanguage = err
 	}
 
-	// Get vendor ID
-	if vendorId, err := c.GetDeviceVendorId(address); err == nil {
-		device.VendorID = vendorId
+	if errs.All() {
+		return dev, errs
 	}
-
-	// Get CEC version
-	if version, err := c.GetDeviceCecVersion(address); err == nil {
-		device.CECVersion = version
-	}
-
-	// Get power status
-	if power, err := c.GetDevicePowerStatus(address); err == nil {
-		device.PowerStatus = power
-	}
-
-	// Get OSD name
-	if name, err := c.GetDeviceOSDName(address); err == nil {
-		device.OSDName = name
-	}
-
-	// Get menu language
-	if lang, err := c.GetDeviceMenuLanguage(address); err == nil {
-		device.MenuLanguage = lang
-	}
-
-	return device, nil
+	return dev, nil
 }
 
-// GetAllDevices scans and returns information about all active devices
-func (c *Connection) GetAllDevices() ([]*Device, error) {
-	// Rescan to ensure we have latest device info
-	if err := c.RescanDevices(); err != nil {
+// GetAllDevices triggers a bus rescan and then returns a Device for every
+// libcec-active address. The settle delay is passed through to RescanDevices;
+// pass 0 to skip waiting (useful when you'll observe updates via Events).
+func (c *Connection) GetAllDevices(settle time.Duration) ([]*Device, error) {
+	if err := c.RescanDevices(settle); err != nil {
 		return nil, err
 	}
-
-	return c.GetAllDevicesNoRescan()
+	return c.GetAllDevicesNoRescan(), nil
 }
 
-// GetAllDevicesNoRescan returns information about all active devices without
-// triggering a bus rescan. This is useful for frequent queries where a full
-// rescan would be too expensive.
-func (c *Connection) GetAllDevicesNoRescan() ([]*Device, error) {
-	addresses := c.GetActiveDevices()
-	devices := make([]*Device, 0, len(addresses))
-
-	for _, addr := range addresses {
-		device, err := c.GetDeviceInfo(addr)
-		if err == nil {
-			devices = append(devices, device)
+// GetAllDevicesNoRescan returns a Device for each libcec-active address
+// without triggering a rescan. Suitable for frequent UI refreshes.
+func (c *Connection) GetAllDevicesNoRescan() []*Device {
+	addrs := c.GetActiveDevices()
+	out := make([]*Device, 0, len(addrs))
+	for _, a := range addrs {
+		dev, err := c.GetDeviceInfo(a)
+		if err != nil {
+			// Even an "all-failed" device is still discoverable, but typical
+			// callers want to know about live devices only - skip silently.
+			continue
 		}
+		out = append(out, dev)
 	}
-
-	return devices, nil
+	return out
 }
 
-// WaitForDeviceReady waits for a device to reach a specific power state
-func (c *Connection) WaitForDeviceReady(address LogicalAddress, targetState PowerStatus, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-
-	for time.Now().Before(deadline) {
+// WaitForDeviceReady polls a device's power status until it matches target,
+// the context is cancelled, or the per-iteration timeout elapses. It uses
+// context cancellation rather than a hard wall-clock deadline so callers can
+// abort cleanly on shutdown.
+func (c *Connection) WaitForDeviceReady(ctx context.Context, address LogicalAddress, target PowerStatus, poll time.Duration) error {
+	if poll <= 0 {
+		poll = 500 * time.Millisecond
+	}
+	if !address.IsValid() {
+		return ErrInvalidLogicalAddress
+	}
+	t := time.NewTicker(poll)
+	defer t.Stop()
+	for {
 		status, err := c.GetDevicePowerStatus(address)
-		if err == nil && status == targetState {
+		if err == nil && status == target {
 			return nil
 		}
-		time.Sleep(500 * time.Millisecond)
+		if errors.Is(err, ErrClosed) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+		}
 	}
-
-	return fmt.Errorf("timeout waiting for device %d to reach state %v", address, targetState)
 }
 
-// getOwnAddress returns the adapter's own logical address on the CEC bus.
-func (c *Connection) getOwnAddress() LogicalAddress {
+// ownAddress returns the adapter's primary logical address, falling back to
+// LogicalAddressFreeUse if the adapter has not registered any.
+func (c *Connection) ownAddress() LogicalAddress {
 	addrs := c.GetLogicalAddresses()
 	if len(addrs) > 0 {
 		return addrs[0]
 	}
-	// Fallback: use unregistered/free-use address so transmit doesn't fail
-	// due to an address the adapter doesn't own.
 	return LogicalAddressFreeUse
 }
 
-// sendImageViewOn sends Image View On (0x04) to the TV to wake it up and
-// ensure it is ready to process source-switching commands.
-func (c *Connection) sendImageViewOn() error {
-	cmd := &Command{
-		Initiator:   c.getOwnAddress(),
+// SendImageViewOn sends Image View On (0x04) to the TV to wake it before
+// switching sources.
+func (c *Connection) SendImageViewOn() error {
+	return c.Transmit(&Command{
+		Initiator:   c.ownAddress(),
 		Destination: LogicalAddressTV,
 		Opcode:      OpcodeImageViewOn,
 		OpcodeSet:   true,
-	}
-	return c.Transmit(cmd)
+	})
 }
 
-// SwitchToHDMIPort switches TV input to a specific HDMI port.
-// Uses libcec's built-in SetHDMIPort as the primary method (which handles
-// CEC protocol correctly), with an Active Source broadcast as fallback.
+// SwitchToHDMIPort switches the TV input to the given HDMI port. It first
+// nudges the TV awake with Image View On, then uses libcec's SetHDMIPort
+// (preferred), falling back to an Active Source broadcast.
 func (c *Connection) SwitchToHDMIPort(port uint8) error {
 	if port < 1 || port > 15 {
-		return fmt.Errorf("invalid HDMI port %d (must be 1-15)", port)
+		return ErrInvalidHDMIPort
 	}
-
-	// Wake up the TV first so it processes the source switch
-	c.sendImageViewOn()
+	_ = c.SendImageViewOn()
 	time.Sleep(300 * time.Millisecond)
 
-	// Primary: use libcec's built-in HDMI port switching
 	if err := c.SetHDMIPort(LogicalAddressTV, port); err == nil {
 		return nil
 	}
-
-	// Fallback: send Active Source broadcast with the port's physical address
-	physicalAddress := uint16(port) << 12
-	cmd := &Command{
-		Initiator:   c.getOwnAddress(),
+	phys := uint16(port) << 12
+	return c.Transmit(&Command{
+		Initiator:   c.ownAddress(),
 		Destination: LogicalAddressBroadcast,
 		Opcode:      OpcodeActiveSource,
 		OpcodeSet:   true,
-		Parameters: []uint8{
-			uint8(physicalAddress >> 8),
-			uint8(physicalAddress & 0xFF),
-		},
-	}
-
-	return c.Transmit(cmd)
+		Parameters:  []uint8{uint8(phys >> 8), uint8(phys & 0xFF)},
+	})
 }
 
-// SwitchToDevice switches to a specific device by its logical address
+// SwitchToDevice broadcasts Active Source for the given device's physical
+// address, prompting the TV to switch input to that device's HDMI port.
 func (c *Connection) SwitchToDevice(address LogicalAddress) error {
-	// Wake up the TV so it is ready to process the source switch
-	c.sendImageViewOn()
+	if !address.IsValid() {
+		return ErrInvalidLogicalAddress
+	}
+	_ = c.SendImageViewOn()
 	time.Sleep(300 * time.Millisecond)
 
-	// Get device's physical address
-	physAddr, err := c.GetDevicePhysicalAddress(address)
+	phys, err := c.GetDevicePhysicalAddress(address)
 	if err != nil {
-		return fmt.Errorf("failed to get physical address: %w", err)
+		return fmt.Errorf("switch to %d: %w", address, err)
 	}
-
-	// Send Active Source broadcast with the target device's physical address.
-	// TVs respond to Active Source by switching to the corresponding input.
-	cmd := &Command{
-		Initiator:   c.getOwnAddress(),
+	return c.Transmit(&Command{
+		Initiator:   c.ownAddress(),
 		Destination: LogicalAddressBroadcast,
 		Opcode:      OpcodeActiveSource,
 		OpcodeSet:   true,
-		Parameters: []uint8{
-			uint8(physAddr >> 8),
-			uint8(physAddr & 0xFF),
-		},
-	}
-
-	return c.Transmit(cmd)
+		Parameters:  []uint8{uint8(phys >> 8), uint8(phys & 0xFF)},
+	})
 }
 
-// SendVolumeKey sends a volume key press directly to a specific device address.
-// Uses wait=true so libcec waits for bus acknowledgment, and a longer hold
-// time so the target device registers the key press.
+// SendVolumeKey sends a volume keypress directly to a specific device,
+// holding it long enough to be registered, then releases.
 func (c *Connection) SendVolumeKey(address LogicalAddress, key Keycode) error {
-	// Send press with wait=true for ACK
 	if err := c.SendKeypress(address, key, true); err != nil {
 		return err
 	}
-
-	// Hold the key long enough for the device to register it
 	time.Sleep(300 * time.Millisecond)
-
-	// Release with wait=true
 	return c.SendKeyRelease(address, true)
 }
 
-// PortInfo describes one HDMI port on the display and which devices are on it.
-type PortInfo struct {
-	Port    uint8            `json:"port"`
-	Devices []LogicalAddress `json:"devices"`
+// nudgeSetSystemAudioMode hints to the TV that system-audio mode should be
+// on. Many AVRs only forward volume after this. Errors are ignored - many
+// TVs feature-abort.
+func (c *Connection) nudgeSetSystemAudioMode(on bool) {
+	own := c.ownAddress()
+	b := byte(0)
+	if on {
+		b = 1
+	}
+	_ = c.Transmit(&Command{
+		Initiator:   own,
+		Destination: LogicalAddressTV,
+		Opcode:      OpcodeSetSystemAudioMode,
+		OpcodeSet:   true,
+		Parameters:  []uint8{b},
+	})
 }
 
-// BusTopology describes the HDMI bus as seen through CEC.
-type BusTopology struct {
-	OwnAddress     LogicalAddress `json:"own_address"`
-	OwnPort        uint8          `json:"own_port"`          // HDMI port the adapter is on (0 = unknown)
-	ActivePorts    []PortInfo     `json:"active_ports"`      // ports with at least one device
-	KnownPortCount uint8          `json:"known_port_count"`  // highest port number observed
+// volumePassThroughOrder returns the logical-address order to try for
+// best-effort volume routing.
+func volumePassThroughOrder() []LogicalAddress {
+	return []LogicalAddress{
+		LogicalAddressAudioSystem,
+		LogicalAddressTV,
+		LogicalAddressPlaybackDevice1,
+		LogicalAddressPlaybackDevice2,
+	}
 }
 
-// GetBusTopology builds a topology of the CEC bus by inspecting the physical
-// addresses of all active devices and grouping them by HDMI port.
-func (c *Connection) GetBusTopology() *BusTopology {
-	topo := &BusTopology{}
-
-	// Determine the adapter's own address
-	topo.OwnAddress = c.getOwnAddress()
-
-	// Get adapter's physical address to determine which port it sits on
-	if topo.OwnAddress != LogicalAddressFreeUse && topo.OwnAddress != LogicalAddressBroadcast {
-		if physAddr, err := c.GetDevicePhysicalAddress(topo.OwnAddress); err == nil && physAddr != 0 && physAddr != 0xFFFF {
-			topo.OwnPort = uint8((physAddr >> 12) & 0xF)
-		}
-	}
-
-	// Collect all active devices and group by port
-	portMap := make(map[uint8][]LogicalAddress)
-	for _, addr := range c.GetActiveDevices() {
-		// Skip TV (address 0) — it IS the display, not on a port
-		if addr == LogicalAddressTV {
+// VolumeUpBestEffort tries CEC user-control volume on common destinations,
+// then falls back to libcec_volume_up.
+func (c *Connection) VolumeUpBestEffort(sendRelease bool) error {
+	c.nudgeSetSystemAudioMode(true)
+	time.Sleep(80 * time.Millisecond)
+	for _, dest := range volumePassThroughOrder() {
+		if dest == c.ownAddress() {
 			continue
 		}
-		physAddr, err := c.GetDevicePhysicalAddress(addr)
-		if err != nil || physAddr == 0 || physAddr == 0xFFFF {
+		if err := c.SendVolumeKey(dest, KeycodeVolumeUp); err == nil {
+			return nil
+		}
+	}
+	return c.VolumeUp(sendRelease)
+}
+
+// VolumeDownBestEffort mirrors VolumeUpBestEffort.
+func (c *Connection) VolumeDownBestEffort(sendRelease bool) error {
+	c.nudgeSetSystemAudioMode(true)
+	time.Sleep(80 * time.Millisecond)
+	for _, dest := range volumePassThroughOrder() {
+		if dest == c.ownAddress() {
 			continue
 		}
-		port := uint8((physAddr >> 12) & 0xF)
-		if port == 0 {
-			continue // 0.x.x.x means internal / unknown
+		if err := c.SendVolumeKey(dest, KeycodeVolumeDown); err == nil {
+			return nil
 		}
-		portMap[port] = append(portMap[port], addr)
-		if port > topo.KnownPortCount {
-			topo.KnownPortCount = port
+	}
+	return c.VolumeDown(sendRelease)
+}
+
+// MuteBestEffort tries user-control mute on common targets, then libcec toggle.
+func (c *Connection) MuteBestEffort() error {
+	c.nudgeSetSystemAudioMode(true)
+	time.Sleep(80 * time.Millisecond)
+	for _, dest := range volumePassThroughOrder() {
+		if dest == c.ownAddress() {
+			continue
+		}
+		if err := c.SendVolumeKey(dest, KeycodeMute); err == nil {
+			return nil
+		}
+	}
+	return c.AudioToggleMute()
+}
+
+// LogicalAddressesWithOptionalPoll returns libcec's active logical addresses
+// plus any additional addresses that respond to a CEC POLL but were not in
+// the active mask. fullPoll probes every missing address 0..14; otherwise it
+// probes the well-known role addresses only.
+func (c *Connection) LogicalAddressesWithOptionalPoll(fullPoll bool) []LogicalAddress {
+	active := c.GetActiveDevices()
+	seen := make(map[LogicalAddress]struct{}, len(active)+16)
+	for _, a := range active {
+		seen[a] = struct{}{}
+	}
+	out := make([]LogicalAddress, 0, len(active)+8)
+	out = append(out, active...)
+
+	var probeOrder []LogicalAddress
+	if fullPoll {
+		for a := LogicalAddress(0); a <= 14; a++ {
+			probeOrder = append(probeOrder, a)
+		}
+	} else {
+		probeOrder = []LogicalAddress{
+			LogicalAddressTV,
+			LogicalAddressRecordingDevice1,
+			LogicalAddressRecordingDevice2,
+			LogicalAddressTuner1,
+			LogicalAddressPlaybackDevice1,
+			LogicalAddressAudioSystem,
+			LogicalAddressTuner2,
+			LogicalAddressTuner3,
+			LogicalAddressPlaybackDevice2,
+			LogicalAddressRecordingDevice3,
+			LogicalAddressTuner4,
+			LogicalAddressPlaybackDevice3,
 		}
 	}
 
-	// Build sorted port list
-	for p := uint8(1); p <= topo.KnownPortCount; p++ {
-		if devs, ok := portMap[p]; ok {
-			topo.ActivePorts = append(topo.ActivePorts, PortInfo{Port: p, Devices: devs})
+	for _, a := range probeOrder {
+		if _, ok := seen[a]; ok {
+			continue
+		}
+		if c.PollDevice(a) {
+			seen[a] = struct{}{}
+			out = append(out, a)
 		}
 	}
 
-	return topo
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 // DeviceTypeForAddress returns the expected DeviceType for a logical address.
@@ -268,43 +383,47 @@ func DeviceTypeForAddress(addr LogicalAddress) DeviceType {
 	}
 }
 
-// GetVendorName returns a human-readable vendor name
-func GetVendorName(vendorId uint64) string {
-	vendors := map[uint64]string{
-		0x000039: "Toshiba",
-		0x0000F0: "Samsung",
-		0x0005CD: "Denon",
-		0x000678: "Marantz",
-		0x000982: "Loewe",
-		0x0009B0: "Onkyo",
-		0x000CB8: "Medion",
-		0x000CE7: "Toshiba",
-		0x001582: "Pulse Eight",
-		0x001950: "Google",
-		0x001A11: "Akai",
-		0x0020C7: "AOC",
-		0x002467: "Panasonic",
-		0x008045: "Philips",
-		0x00903E: "Pioneer",
-		0x009053: "LG",
-		0x00A0DE: "Sharp",
-		0x00D0D5: "Vizio",
-		0x00E036: "Harman Kardon",
-		0x00E091: "Yamaha",
-		0x08001F: "Sony",
-		0x18C086: "Broadcom",
-		0x6B746D: "Vizio",
-		0x8065E9: "Benq",
-		0x9C645E: "Daewoo",
-	}
+// vendorNames is the static vendor-ID -> human-name lookup, built once at
+// init time so GetVendorName allocates nothing on the hot path.
+var vendorNames = map[uint64]string{
+	0x000039: "Toshiba",
+	0x0000F0: "Samsung",
+	0x0005CD: "Denon",
+	0x000678: "Marantz",
+	0x000982: "Loewe",
+	0x0009B0: "Onkyo",
+	0x000CB8: "Medion",
+	0x000CE7: "Toshiba",
+	0x001582: "Pulse Eight",
+	0x001950: "Google",
+	0x001A11: "Akai",
+	0x0020C7: "AOC",
+	0x002467: "Panasonic",
+	0x008045: "Philips",
+	0x00903E: "Pioneer",
+	0x009053: "LG",
+	0x00A0DE: "Sharp",
+	0x00D0D5: "Vizio",
+	0x00E036: "Harman Kardon",
+	0x00E091: "Yamaha",
+	0x08001F: "Sony",
+	0x18C086: "Broadcom",
+	0x6B746D: "Vizio",
+	0x8065E9: "Benq",
+	0x9C645E: "Daewoo",
+}
 
-	if name, ok := vendors[vendorId]; ok {
+// GetVendorName returns a human-readable vendor name for a CEC vendor ID.
+// Unknown IDs are formatted as "Unknown (0xABCDEF)".
+func GetVendorName(vendorId uint64) string {
+	if name, ok := vendorNames[vendorId]; ok {
 		return name
 	}
 	return fmt.Sprintf("Unknown (0x%06X)", vendorId)
 }
 
-// PhysicalAddressToString converts a physical address to dot notation
+// PhysicalAddressToString converts a packed physical address into dotted form
+// (e.g. 0x2100 -> "2.1.0.0").
 func PhysicalAddressToString(addr uint16) string {
 	a := (addr >> 12) & 0xF
 	b := (addr >> 8) & 0xF
@@ -313,91 +432,62 @@ func PhysicalAddressToString(addr uint16) string {
 	return fmt.Sprintf("%d.%d.%d.%d", a, b, c, d)
 }
 
-// ParsePhysicalAddress converts dot notation to physical address
+// ParsePhysicalAddress parses dotted form back into the packed uint16.
 func ParsePhysicalAddress(addrStr string) (uint16, error) {
-	var a, b, c, d uint16
-	_, err := fmt.Sscanf(addrStr, "%d.%d.%d.%d", &a, &b, &c, &d)
-	if err != nil {
-		return 0, err
+	parts := strings.Split(addrStr, ".")
+	if len(parts) != 4 {
+		return 0, fmt.Errorf("cec: physical address %q must have 4 dotted components", addrStr)
 	}
-
-	if a > 15 || b > 15 || c > 15 || d > 15 {
-		return 0, fmt.Errorf("invalid physical address components (must be 0-15)")
+	out := uint16(0)
+	for i, p := range parts {
+		var v uint16
+		n, err := fmt.Sscanf(p, "%d", &v)
+		if err != nil || n != 1 {
+			return 0, fmt.Errorf("cec: physical address %q: bad component %d: %v", addrStr, i+1, err)
+		}
+		if v > 15 {
+			return 0, fmt.Errorf("cec: physical address components must be 0-15 (got %d in %q)", v, addrStr)
+		}
+		out = (out << 4) | v
 	}
-
-	return (a << 12) | (b << 8) | (c << 4) | d, nil
+	return out, nil
 }
 
-// SendButton sends a button press and release
+// SendButton sends a brief key press + release.
 func (c *Connection) SendButton(address LogicalAddress, key Keycode) error {
-	// Send press
 	if err := c.SendKeypress(address, key, false); err != nil {
 		return err
 	}
-
-	// Wait a bit
 	time.Sleep(100 * time.Millisecond)
-
-	// Send release
 	return c.SendKeyRelease(address, false)
 }
 
-// NavigateMenu sends navigation commands
+// NavigateMenu is a convenience wrapper around SendButton for menu navigation.
 func (c *Connection) NavigateMenu(address LogicalAddress, direction Keycode) error {
 	return c.SendButton(address, direction)
 }
 
-// SetVolume sets absolute volume (if supported by device)
-// This is a helper that sends multiple volume up/down commands
-func (c *Connection) SetVolume(targetLevel int, currentLevel int) error {
+// SetVolume sends repeated VolumeUp/VolumeDown to step from currentLevel to
+// targetLevel. The poll spacing matches what most AVRs accept reliably.
+func (c *Connection) SetVolume(targetLevel, currentLevel int) error {
 	if targetLevel == currentLevel {
 		return nil
 	}
-
-	if targetLevel > currentLevel {
-		// Volume up
-		steps := targetLevel - currentLevel
-		for i := 0; i < steps; i++ {
-			if err := c.VolumeUp(true); err != nil {
-				return err
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-	} else {
-		// Volume down
-		steps := currentLevel - targetLevel
-		for i := 0; i < steps; i++ {
-			if err := c.VolumeDown(true); err != nil {
-				return err
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
+	steps := targetLevel - currentLevel
+	if steps < 0 {
+		steps = -steps
 	}
-
-	return nil
-}
-
-// MonitorConnection monitors the connection and reconnects if needed
-func (c *Connection) MonitorConnection(reconnectFunc func() error) {
-	// This can be called in a goroutine to monitor connection health
-	// and attempt reconnection if the adapter becomes unavailable
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	const maxConsecutiveFailures = 3
-	failures := 0
-
-	for range ticker.C {
-		// Use a simple health check that returns an error on failure.
-		if _, err := c.GetDevicePowerStatus(LogicalAddressTV); err != nil {
-			failures++
+	for i := 0; i < steps; i++ {
+		var err error
+		if targetLevel > currentLevel {
+			err = c.VolumeUp(true)
 		} else {
-			failures = 0
+			err = c.VolumeDown(true)
 		}
-
-		if failures >= maxConsecutiveFailures && reconnectFunc != nil {
-			_ = reconnectFunc()
-			failures = 0
+		if err != nil {
+			return err
 		}
+		time.Sleep(100 * time.Millisecond)
 	}
+	return nil
 }
