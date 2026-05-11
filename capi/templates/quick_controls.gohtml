@@ -1,0 +1,43 @@
+{{define "quick_controls"}}
+<h2>Quick controls</h2>
+
+<!-- Display power. Always targets the TV / projector (LA 0). -->
+<div class="remote-row">
+  <span class="remote-label">Display</span>
+  <button type="button" class="big"
+          hx-post="/ui/action/power_on?addr=0"
+          hx-target="#action-flash" hx-swap="innerHTML">Power On</button>
+  <button type="button" class="big"
+          hx-post="/ui/action/power_off?addr=0"
+          hx-target="#action-flash" hx-swap="innerHTML">Standby</button>
+</div>
+
+<!-- HDMI inputs. The {{.HDMIPorts}} list is built server-side from the
+     known port count (or a default of 4) so these buttons always render
+     even when no other devices are visible on the bus. -->
+<div class="remote-row">
+  <span class="remote-label">HDMI</span>
+  {{range .HDMIPorts}}
+  <button type="button" class="big{{if and $.ActiveHDMI (eq . $.ActiveHDMI)}} accent{{end}}"
+          hx-post="/ui/action/hdmi?port={{.}}"
+          hx-target="#action-flash" hx-swap="innerHTML">{{.}}</button>
+  {{end}}
+</div>
+
+<!-- Volume. Best-effort: tries AudioSystem, then TV, then libcec. On a
+     TV-only bus where the display feature-aborts USER_CONTROL_PRESSED
+     (e.g. LG projectors), these will silently be no-ops; that's a hardware
+     limitation surfaced via the strategy bench at /dev. -->
+<div class="remote-row">
+  <span class="remote-label">Volume</span>
+  <button type="button" class="big"
+          hx-post="/ui/action/volume_up"
+          hx-target="#action-flash" hx-swap="innerHTML">Vol +</button>
+  <button type="button" class="big"
+          hx-post="/ui/action/volume_down"
+          hx-target="#action-flash" hx-swap="innerHTML">Vol −</button>
+  <button type="button" class="big"
+          hx-post="/ui/action/volume_mute"
+          hx-target="#action-flash" hx-swap="innerHTML">Mute</button>
+</div>
+{{end}}

@@ -226,6 +226,222 @@ label {
   margin-bottom: 2px;
 }
 
+.dev-card.ghost {
+  border-left-color: var(--warn);
+  background: rgba(0, 0, 0, .35);
+}
+
+.dev-fields {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 10px;
+  row-gap: 2px;
+  margin: 6px 0 8px;
+  font-size: .8rem;
+}
+
+.dev-fields dt {
+  color: var(--muted);
+  font-weight: normal;
+  text-transform: lowercase;
+  white-space: nowrap;
+}
+
+.dev-fields dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.badge.ok {
+  background: var(--ok);
+  color: #000;
+}
+
+body.dev .dev-banner {
+  background: var(--surface);
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  font-size: .85rem;
+  margin-bottom: var(--gap);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.dev-table, .dev-trace {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .8rem;
+  margin-top: 4px;
+}
+
+.dev-table th, .dev-trace th {
+  text-align: left;
+  font-weight: normal;
+  color: var(--muted);
+  border-bottom: 1px solid rgba(255, 255, 255, .1);
+  padding: 4px 6px;
+}
+
+.dev-table td, .dev-trace td {
+  padding: 3px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, .04);
+  vertical-align: top;
+}
+
+.dev-strat-ok td {
+  color: var(--ok);
+}
+
+.dev-strat-feature_aborted td {
+  color: var(--accent);
+}
+
+.dev-strat-no_ack td,
+.dev-strat-error td {
+  color: var(--warn);
+}
+
+/* ── Remote view (the simplified `/` page) ─────────────────────────── */
+
+body.remote {
+  max-width: 600px;
+}
+
+.remote-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: var(--gap);
+}
+
+.remote-head h1 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.remote-nav {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  font-size: .8rem;
+}
+
+.remote-nav a {
+  color: var(--muted);
+  text-decoration: none;
+  border-bottom: 1px dotted rgba(255, 255, 255, .2);
+}
+
+.remote-nav a:hover {
+  color: var(--text);
+}
+
+.bus-banner-strip {
+  font-size: .75rem;
+  color: var(--muted);
+  margin-bottom: var(--gap);
+}
+
+.row-between {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.remote-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 8px 0;
+}
+
+.remote-label {
+  display: inline-block;
+  min-width: 64px;
+  font-size: .75rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .5px;
+}
+
+button.big {
+  min-height: 44px;
+  min-width: 64px;
+  font-size: .95rem;
+  padding: 8px 16px;
+  flex: 0 0 auto;
+}
+
+/* The remote always lays out single-column on the / page even on wider
+   screens; the dashboard layout (.grid) doesn't apply here. */
+body.remote .grid {
+  grid-template-columns: 1fr;
+}
+
+.remote-pad {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: center;
+  margin: 12px 0;
+  flex-wrap: wrap;
+}
+
+.remote-pad .dpad {
+  display: grid;
+  grid-template-columns: repeat(3, 64px);
+  grid-template-rows: repeat(3, 64px);
+  gap: 6px;
+}
+
+.remote-pad .dpad-btn {
+  width: 64px;
+  height: 64px;
+  font-size: 1.4rem;
+  padding: 0;
+  border-radius: 12px;
+}
+
+.remote-pad .dpad-btn.center {
+  background: var(--accent);
+  border-radius: 50%;
+  font-size: 1rem;
+  font-weight: bold;
+}
+
+.remote-pad .empty {
+  visibility: hidden;
+}
+
+.remote-side {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Slimmer device cards for the remote */
+body.remote .dev-card {
+  padding: 10px 12px;
+}
+
+body.remote .dev-card .dev-meta {
+  font-size: .75rem;
+}
+
+body.remote .dev-card .dev-actions {
+  margin-top: 8px;
+  gap: 6px;
+}
+
 .dpad {
   display: grid;
   grid-template-columns: repeat(3, 56px);

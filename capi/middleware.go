@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"runtime/debug"
 	"strings"
@@ -43,13 +45,23 @@ func (r *statusRecorder) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// Hijack is needed for the SSE/WebSocket flusher path: the gorilla/mux
-// handler will type-assert the response writer for http.Flusher and
-// http.Hijacker. We forward those interfaces transparently.
+// Flush forwards to the wrapped writer's Flusher impl so SSE handlers can
+// flush each event.
 func (r *statusRecorder) Flush() {
 	if f, ok := r.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// Hijack forwards to the wrapped writer's Hijacker impl so the WebSocket
+// upgrader (gorilla/websocket) can take over the underlying TCP connection.
+// Without this, every request through loggingMiddleware fails the upgrade
+// with "response does not implement http.Hijacker".
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := r.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, fmt.Errorf("statusRecorder: underlying writer is not a Hijacker")
 }
 
 func newRequestID() string {

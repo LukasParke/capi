@@ -182,15 +182,24 @@ func runStewardJob(req stewardReq) {
 		// no RescanDevices
 	}
 
-	addrs := conn.LogicalAddressesWithOptionalPoll(true)
+	// Drop any ghost devices that haven't been heard from in a while
+	// before we rebuild the snapshot. Keeps phantom entries from lingering
+	// after an HDMI unplug.
+	globalBusState.pruneStaleObserved(cfg.staleDeviceTTL())
+
+	activeAddrs := conn.LogicalAddressesWithOptionalPoll(true)
+	activeSet := make(map[int]struct{}, len(activeAddrs))
+	for _, a := range activeAddrs {
+		activeSet[int(a)] = struct{}{}
+	}
 	activeSrc := -1
 	if a, err := conn.GetActiveSource(); err == nil {
 		activeSrc = int(a)
 	}
 
-	devMaps := make([]map[string]interface{}, 0, len(addrs))
+	devMaps := make([]map[string]interface{}, 0, len(activeAddrs)+8)
 	deadline := time.Now().Add(25 * time.Second)
-	for _, addr := range addrs {
+	for _, addr := range activeAddrs {
 		if time.Now().After(deadline) {
 			break
 		}
@@ -200,6 +209,7 @@ func runStewardJob(req stewardReq) {
 		}
 		m := deviceToMap(dev)
 		m["polled_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+		m["discovery"] = "active"
 		devMaps = append(devMaps, m)
 	}
 
@@ -207,12 +217,53 @@ func runStewardJob(req stewardReq) {
 		runGiveProbes(conn, devMaps, cfg)
 	}
 
+	// Ghost devices: addresses we've ever observed initiating CEC frames
+	// that aren't in libcec's active mask. Render them with whatever
+	// fields recordObserved has filled in; no probing (libcec wouldn't
+	// reach them anyway, by definition).
+	for _, addr := range globalBusState.observedAddresses() {
+		if _, ok := activeSet[addr]; ok {
+			continue
+		}
+		la := cec.LogicalAddress(addr)
+		ghost := map[string]interface{}{
+			"logical_address": addr,
+			"address_name":    la.String(),
+			"device_type":     cec.DeviceTypeForAddress(la).String(),
+			"discovery":       "observed",
+		}
+		devMaps = append(devMaps, ghost)
+	}
+
+	// Annotate every entry with first/last seen timestamps for the UI.
+	first, last := globalBusState.seenTimestamps()
+	for i := range devMaps {
+		la, ok := devMaps[i]["logical_address"].(int)
+		if !ok {
+			continue
+		}
+		if t, ok := first[la]; ok {
+			devMaps[i]["first_seen_at"] = t.Format(time.RFC3339Nano)
+		}
+		if t, ok := last[la]; ok {
+			devMaps[i]["last_seen_at"] = t.Format(time.RFC3339Nano)
+		}
+	}
+
+	// Combined address list for the snapshot header (active + observed).
+	allAddrs := make([]int, 0, len(devMaps))
+	for _, m := range devMaps {
+		if la, ok := m["logical_address"].(int); ok {
+			allAddrs = append(allAddrs, la)
+		}
+	}
+
 	now := time.Now()
 	lastFull := now
 	globalBusState.mergeObservedIntoDevices(devMaps)
 	globalBusState.replaceSnapshot(
 		devMaps,
-		logicalAddrInts(addrs),
+		allAddrs,
 		activeSrc,
 		true,
 		monitoring,
@@ -228,11 +279,11 @@ func runStewardJob(req stewardReq) {
 			Data: map[string]interface{}{
 				"reason":            "steward",
 				"kind":              stewardKindString(req.kind),
-				"logical_addresses": logicalAddrInts(addrs),
+				"logical_addresses": allAddrs,
 			},
 		})
 	}
-	appLog("steward", "reconcile kind=%s addrs=%v devices=%d", stewardKindString(req.kind), logicalAddrInts(addrs), len(devMaps))
+	appLog("steward", "reconcile kind=%s addrs=%v devices=%d", stewardKindString(req.kind), allAddrs, len(devMaps))
 }
 
 func stewardKindString(k stewardKind) string {

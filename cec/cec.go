@@ -19,6 +19,10 @@ package cec
 #include <stdint.h>
 
 extern void cec_install_callbacks(libcec_configuration* cfg, uintptr_t handle);
+extern void cec_set_passive_defaults(libcec_configuration* cfg);
+extern void cec_set_activate_source(libcec_configuration* cfg, int v);
+extern void cec_set_monitor_only(libcec_configuration* cfg, int v);
+extern void cec_apply_address_list(cec_logical_addresses* dest, const uint8_t* addrs, int n);
 */
 import "C"
 
@@ -33,7 +37,7 @@ import (
 
 // Configuration mirrors a subset of libcec_configuration that is meaningful
 // to typical bridge use. Use NewConfiguration to obtain one with sensible
-// defaults; pass to OpenWithConfig.
+// (passive, non-disruptive) defaults; pass to OpenWith.
 type Configuration struct {
 	DeviceName        string
 	DeviceType        DeviceType
@@ -43,6 +47,28 @@ type Configuration struct {
 	ClientVersion     uint32
 	ServerVersion     uint32
 	TryLogicalAddress LogicalAddress
+
+	// ActivateSource: when true, libcec announces this connection as the
+	// active source on libcec_open, which causes a TV/projector to switch
+	// its input to us. Defaults to false; opt in only when you actually want
+	// to claim the display.
+	ActivateSource bool
+
+	// WakeDevices: logical addresses libcec wakes on connect (sends
+	// ImageViewOn / ActiveSource). Empty by default; libcec's default of
+	// {TV} is suppressed.
+	WakeDevices []LogicalAddress
+
+	// PowerOffDevices: logical addresses libcec puts in standby on
+	// disconnect (broadcast Standby). Empty by default; libcec's default of
+	// {BROADCAST} is suppressed so the entire bus does not standby when the
+	// adapter session ends.
+	PowerOffDevices []LogicalAddress
+
+	// MonitorOnly: when true, libcec does not allocate a logical address
+	// and we become a pure read-only listener. Transmit calls return
+	// ErrMonitorOnly while in this mode.
+	MonitorOnly bool
 }
 
 // Options configure a new Connection. Zero-value Options are valid.
@@ -67,9 +93,10 @@ type Connection struct {
 	menuFn atomic.Pointer[func(MenuState) bool]
 }
 
-// NewConfiguration returns a default configuration suitable for a passive CEC
-// bridge: the given device name, the given device type, auto-detect physical
-// address, and the libcec client version we were built against.
+// NewConfiguration returns a default configuration suitable for a passive
+// CEC bridge: auto-detect physical address, libcec client version we were
+// built against, and explicitly non-disruptive (no active-source claim, no
+// wake on connect, no standby broadcast on disconnect).
 func NewConfiguration(deviceName string, deviceType DeviceType) *Configuration {
 	return &Configuration{
 		DeviceName:        deviceName,
@@ -77,6 +104,13 @@ func NewConfiguration(deviceName string, deviceType DeviceType) *Configuration {
 		PhysicalAddress:   0xFFFF, // auto-detect
 		ClientVersion:     C.LIBCEC_VERSION_CURRENT,
 		TryLogicalAddress: LogicalAddressUnknown,
+		// Bus-disruption knobs default off. Override on the returned struct
+		// before calling OpenWith if you actually want libcec to take over
+		// the display / wake the TV / standby the bus.
+		ActivateSource:  false,
+		WakeDevices:     nil,
+		PowerOffDevices: nil,
+		MonitorOnly:     false,
 	}
 }
 
@@ -101,17 +135,8 @@ func OpenWith(cfg *Configuration, opts Options) (*Connection, error) {
 	c.cgoHandle = cgo.NewHandle(c)
 
 	cConfig := C.libcec_configuration{}
-	C.libcec_clear_configuration(&cConfig)
-
-	cName := C.CString(cfg.DeviceName)
+	cName := buildLibCECConfig(&cConfig, cfg)
 	defer C.free(unsafe.Pointer(cName))
-	C.strncpy(&cConfig.strDeviceName[0], cName, C.LIBCEC_OSD_NAME_SIZE-1)
-
-	cConfig.deviceTypes.types[0] = C.cec_device_type(cfg.DeviceType)
-	cConfig.iPhysicalAddress = C.uint16_t(cfg.PhysicalAddress)
-	cConfig.baseDevice = C.cec_logical_address(cfg.BaseDevice)
-	cConfig.iHDMIPort = C.uint8_t(cfg.HDMIPort)
-	cConfig.clientVersion = C.uint32_t(cfg.ClientVersion)
 
 	C.cec_install_callbacks(&cConfig, C.uintptr_t(c.cgoHandle))
 
@@ -123,6 +148,72 @@ func OpenWith(cfg *Configuration, opts Options) (*Connection, error) {
 
 	c.initialized = true
 	return c, nil
+}
+
+// buildLibCECConfig populates a freshly-zeroed libcec_configuration from the
+// Go-side Configuration, applying our passive defaults first and then
+// overriding only the knobs the caller explicitly requested. The returned
+// *C.char is the strDeviceName malloc the caller must free.
+func buildLibCECConfig(cConfig *C.libcec_configuration, cfg *Configuration) *C.char {
+	C.libcec_clear_configuration(cConfig)
+	// Override libcec's bus-disrupting defaults
+	// (bActivateSource=1, wakeDevices={TV}, powerOffDevices={BROADCAST}).
+	C.cec_set_passive_defaults(cConfig)
+
+	cName := C.CString(cfg.DeviceName)
+	C.strncpy(&cConfig.strDeviceName[0], cName, C.LIBCEC_OSD_NAME_SIZE-1)
+
+	cConfig.deviceTypes.types[0] = C.cec_device_type(cfg.DeviceType)
+	cConfig.iPhysicalAddress = C.uint16_t(cfg.PhysicalAddress)
+	cConfig.baseDevice = C.cec_logical_address(cfg.BaseDevice)
+	cConfig.iHDMIPort = C.uint8_t(cfg.HDMIPort)
+	cConfig.clientVersion = C.uint32_t(cfg.ClientVersion)
+
+	if cfg.ActivateSource {
+		C.cec_set_activate_source(cConfig, 1)
+	}
+	if cfg.MonitorOnly {
+		C.cec_set_monitor_only(cConfig, 1)
+	}
+	applyAddressList(&cConfig.wakeDevices, cfg.WakeDevices)
+	applyAddressList(&cConfig.powerOffDevices, cfg.PowerOffDevices)
+
+	return cName
+}
+
+// applyAddressList writes a Go LogicalAddress slice into a C
+// cec_logical_addresses field. An empty slice clears it (no addresses).
+func applyAddressList(dest *C.cec_logical_addresses, addrs []LogicalAddress) {
+	if dest == nil {
+		return
+	}
+	if len(addrs) == 0 {
+		C.cec_apply_address_list(dest, nil, 0)
+		return
+	}
+	buf := make([]C.uint8_t, 0, len(addrs))
+	for _, la := range addrs {
+		if !la.IsValid() {
+			continue
+		}
+		buf = append(buf, C.uint8_t(la))
+	}
+	if len(buf) == 0 {
+		C.cec_apply_address_list(dest, nil, 0)
+		return
+	}
+	C.cec_apply_address_list(dest, &buf[0], C.int(len(buf)))
+}
+
+// IsMonitorOnly reports whether this connection was opened with
+// MonitorOnly=true. In that mode libcec did not allocate a logical address
+// and Transmit / SendKeypress / SendKeyRelease will refuse with
+// ErrMonitorOnly.
+func (c *Connection) IsMonitorOnly() bool {
+	if c == nil || c.config == nil {
+		return false
+	}
+	return c.config.MonitorOnly
 }
 
 // Events returns a channel that delivers asynchronous CEC events. The channel

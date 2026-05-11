@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/LukasParke/capi/cec"
 
@@ -17,6 +18,9 @@ func deviceToMap(dev *cec.Device) map[string]interface{} {
 	if dev.PhysicalAddress != 0 && dev.PhysicalAddress != 0xFFFF {
 		hdmiPort = uint8((dev.PhysicalAddress >> 12) & 0xF)
 	}
+	if dev.VendorID != 0 {
+		noteUnknownVendor(dev.VendorID)
+	}
 	return map[string]interface{}{
 		"logical_address":  int(dev.LogicalAddress),
 		"address_name":     dev.LogicalAddress.String(),
@@ -25,6 +29,7 @@ func deviceToMap(dev *cec.Device) map[string]interface{} {
 		"hdmi_port":        int(hdmiPort),
 		"vendor_id":        fmt.Sprintf("0x%06X", dev.VendorID),
 		"vendor_name":      cec.GetVendorName(dev.VendorID),
+		"vendor_known":     cec.IsKnownVendor(dev.VendorID),
 		"cec_version":      dev.CECVersion.String(),
 		"power_status":     dev.PowerStatus.String(),
 		"osd_name":         dev.OSDName,
@@ -32,6 +37,20 @@ func deviceToMap(dev *cec.Device) map[string]interface{} {
 		"is_active":        dev.IsActive,
 		"is_active_source": dev.IsActiveSource,
 	}
+}
+
+// unknownVendorsSeen tracks vendor IDs we've already logged about this
+// process, so /api/devices doesn't spam the journal once per scan.
+var unknownVendorsSeen sync.Map
+
+func noteUnknownVendor(vendorID uint64) {
+	if cec.IsKnownVendor(vendorID) {
+		return
+	}
+	if _, loaded := unknownVendorsSeen.LoadOrStore(vendorID, struct{}{}); loaded {
+		return
+	}
+	appLog("cec", "unknown vendor 0x%06X seen on bus - please add to cec.vendorNames", vendorID)
 }
 
 // getDeviceHandler implements GET /api/devices/{address}.

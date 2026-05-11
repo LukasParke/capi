@@ -86,3 +86,42 @@ void cec_install_callbacks(libcec_configuration* cfg, uintptr_t handle) {
     cfg->callbacks     = cec_callback_table();
     cfg->callbackParam = (void*)handle;
 }
+
+// cec_apply_address_list clears a cec_logical_addresses struct and then
+// populates it with up to 16 entries. Used to override the bus-disrupting
+// libcec defaults (wakeDevices = TV, powerOffDevices = BROADCAST) without
+// reaching into the cgo struct layout from Go.
+void cec_apply_address_list(cec_logical_addresses* dest, const uint8_t* addrs, int n) {
+    if (!dest) return;
+    dest->primary = CECDEVICE_UNKNOWN;
+    for (int i = 0; i < 16; i++) {
+        dest->addresses[i] = 0;
+    }
+    if (!addrs || n <= 0) return;
+    for (int i = 0; i < n; i++) {
+        uint8_t la = addrs[i];
+        if (la > 15) continue;
+        if (i == 0) dest->primary = (cec_logical_address)la;
+        dest->addresses[la] = 1;
+    }
+}
+
+// cec_set_passive_defaults zeros out every libcec configuration knob that
+// would otherwise emit state-changing CEC traffic on libcec_open or
+// libcec_destroy. Callers re-enable individual knobs after this if they want
+// the default behavior back.
+void cec_set_passive_defaults(libcec_configuration* cfg) {
+    if (!cfg) return;
+    cfg->bActivateSource = 0;
+    cfg->bMonitorOnly    = 0;
+    cec_apply_address_list(&cfg->wakeDevices,     NULL, 0);
+    cec_apply_address_list(&cfg->powerOffDevices, NULL, 0);
+}
+
+void cec_set_activate_source(libcec_configuration* cfg, int v) {
+    if (cfg) cfg->bActivateSource = (uint8_t)(v ? 1 : 0);
+}
+
+void cec_set_monitor_only(libcec_configuration* cfg, int v) {
+    if (cfg) cfg->bMonitorOnly = (uint8_t)(v ? 1 : 0);
+}

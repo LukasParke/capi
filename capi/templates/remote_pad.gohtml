@@ -1,0 +1,44 @@
+{{define "remote_pad"}}
+<h2>Navigation</h2>
+
+<!-- Target selector: which device the D-pad / media keys go to. Defaults
+     to the active source LA when known; otherwise a common playback LA so
+     the buttons never sit dead. -->
+<form id="pad-frm" class="remote-row">
+  <span class="remote-label">Target</span>
+  <select name="addr">
+    {{range .NavTargets}}<option value="{{.LA}}"{{if .Selected}} selected{{end}}>LA {{.LA}} - {{.Label}}</option>{{end}}
+  </select>
+</form>
+
+<div class="remote-pad">
+  <div class="dpad">
+    <span class="empty"></span>
+    <button type="button" class="dpad-btn" hx-post="/ui/action/nav_key" hx-include="#pad-frm" hx-vals='{"key":"up"}' hx-target="#action-flash" hx-swap="innerHTML">▲</button>
+    <span class="empty"></span>
+
+    <button type="button" class="dpad-btn" hx-post="/ui/action/nav_key" hx-include="#pad-frm" hx-vals='{"key":"left"}' hx-target="#action-flash" hx-swap="innerHTML">◀</button>
+    <button type="button" class="dpad-btn center" hx-post="/ui/action/nav_key" hx-include="#pad-frm" hx-vals='{"key":"select"}' hx-target="#action-flash" hx-swap="innerHTML">OK</button>
+    <button type="button" class="dpad-btn" hx-post="/ui/action/nav_key" hx-include="#pad-frm" hx-vals='{"key":"right"}' hx-target="#action-flash" hx-swap="innerHTML">▶</button>
+
+    <span class="empty"></span>
+    <button type="button" class="dpad-btn" hx-post="/ui/action/nav_key" hx-include="#pad-frm" hx-vals='{"key":"down"}' hx-target="#action-flash" hx-swap="innerHTML">▼</button>
+    <span class="empty"></span>
+  </div>
+
+  <div class="remote-side">
+    <button type="button" class="big" hx-post="/ui/action/nav_key" hx-include="#pad-frm" hx-vals='{"key":"home"}' hx-target="#action-flash" hx-swap="innerHTML">Home</button>
+    <button type="button" class="big" hx-post="/ui/action/nav_key" hx-include="#pad-frm" hx-vals='{"key":"menu"}' hx-target="#action-flash" hx-swap="innerHTML">Menu</button>
+    <button type="button" class="big" hx-post="/ui/action/nav_key" hx-include="#pad-frm" hx-vals='{"key":"back"}' hx-target="#action-flash" hx-swap="innerHTML">Back</button>
+  </div>
+</div>
+
+<div class="remote-row" style="margin-top:8px">
+  <span class="remote-label">Media</span>
+  <button type="button" class="big" hx-post="/ui/action/nav_key" hx-include="#pad-frm" hx-vals='{"key":"play"}' hx-target="#action-flash" hx-swap="innerHTML">Play</button>
+  <button type="button" class="big" hx-post="/ui/action/nav_key" hx-include="#pad-frm" hx-vals='{"key":"pause"}' hx-target="#action-flash" hx-swap="innerHTML">Pause</button>
+  <button type="button" class="big" hx-post="/ui/action/nav_key" hx-include="#pad-frm" hx-vals='{"key":"stop"}' hx-target="#action-flash" hx-swap="innerHTML">Stop</button>
+  <button type="button" class="big" hx-post="/ui/action/nav_key" hx-include="#pad-frm" hx-vals='{"key":"rewind"}' hx-target="#action-flash" hx-swap="innerHTML">⏪</button>
+  <button type="button" class="big" hx-post="/ui/action/nav_key" hx-include="#pad-frm" hx-vals='{"key":"fast_forward"}' hx-target="#action-flash" hx-swap="innerHTML">⏩</button>
+</div>
+{{end}}

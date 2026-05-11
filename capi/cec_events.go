@@ -66,6 +66,13 @@ func handleCECKeyPress(p *cec.KeyPayload) {
 func handleCECCommand(cmd *cec.Command) {
 	log.Printf("Command received: %s -> %s, opcode: 0x%02X",
 		cmd.Initiator.String(), cmd.Destination.String(), cmd.Opcode)
+	// Note every initiator we've ever heard, even when the opcode itself
+	// doesn't have a specific recordObserved branch. This is what lets
+	// ghost devices (e.g. the receiver behind a non-bridging projector)
+	// appear in /api/devices the moment they ever speak.
+	if cmd.Initiator <= cec.LogicalAddressFreeUse {
+		globalBusState.noteSeen(int(cmd.Initiator))
+	}
 	globalBusState.ApplyObservedFromCECCCommand(cmd)
 	cfg := busConfigLocked()
 	if ringCap := cfg.frameRingSize(); ringCap > 0 {

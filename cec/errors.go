@@ -28,4 +28,8 @@ var (
 	// ErrLibcecCall wraps a generic libcec call failure (the underlying lib
 	// returned 0 / NULL).
 	ErrLibcecCall = errors.New("cec: libcec call failed")
+
+	// ErrMonitorOnly is returned by Transmit and the SendKey* methods when
+	// the connection was opened with Configuration.MonitorOnly = true.
+	ErrMonitorOnly = errors.New("cec: connection is monitor-only; cannot transmit")
 )

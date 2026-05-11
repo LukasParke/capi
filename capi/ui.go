@@ -19,7 +19,23 @@ import (
 var uiTmpl *template.Template
 
 func init() {
-	uiTmpl = template.Must(template.ParseFS(uiTemplatesFS, "templates/*.gohtml"))
+	uiTmpl = template.Must(template.New("").Funcs(uiFuncs()).ParseFS(uiTemplatesFS, "templates/*.gohtml"))
+}
+
+// uiFuncs is the template FuncMap used by every page. Kept tiny on purpose;
+// presentation logic that needs more than a one-liner belongs in the Go
+// handler that builds the data map.
+func uiFuncs() template.FuncMap {
+	return template.FuncMap{
+		"iterRange": func(n int) []int {
+			out := make([]int, n)
+			for i := 0; i < n; i++ {
+				out[i] = i
+			}
+			return out
+		},
+		"add": func(a, b int) int { return a + b },
+	}
 }
 
 func cecAdapterReady() bool { return adapterReady() }
@@ -32,16 +48,19 @@ func registerUIHandlers(r *mux.Router) {
 	r.PathPrefix("/ui/static/").Handler(http.StripPrefix("/ui/static/", http.FileServer(http.FS(staticFS))))
 
 	r.HandleFunc("/", uiLayoutHandler).Methods("GET")
+	r.HandleFunc("/settings", uiSettingsLayoutHandler).Methods("GET")
 	r.HandleFunc("/ui/fragment/bus_banner", uiFragmentBusBanner).Methods("GET")
 	r.HandleFunc("/ui/fragment/devices", uiFragmentDevices).Methods("GET")
 	r.HandleFunc("/ui/fragment/device_power", uiFragmentDevicePower).Methods("GET")
+	r.HandleFunc("/ui/fragment/mqtt_panel", uiFragmentMQTTPanel).Methods("GET")
+	r.HandleFunc("/ui/fragment/health", uiFragmentHealth).Methods("GET")
+	// Legacy fragments retained for any external integrations that still
+	// hit them; not referenced by the simplified remote layout.
 	r.HandleFunc("/ui/fragment/topology_hdmi", uiFragmentTopologyHDMI).Methods("GET")
 	r.HandleFunc("/ui/fragment/volume_panel", uiFragmentVolumePanel).Methods("GET")
 	r.HandleFunc("/ui/fragment/nav_panel", uiFragmentNavPanel).Methods("GET")
 	r.HandleFunc("/ui/fragment/source_panel", uiFragmentSourcePanel).Methods("GET")
-	r.HandleFunc("/ui/fragment/mqtt_panel", uiFragmentMQTTPanel).Methods("GET")
 	r.HandleFunc("/ui/fragment/logs", uiFragmentLogs).Methods("GET")
-	r.HandleFunc("/ui/fragment/health", uiFragmentHealth).Methods("GET")
 
 	r.HandleFunc("/ui/action/deep_scan", uiActionDeepScan).Methods("POST")
 	r.HandleFunc("/ui/action/power_on", uiActionPowerOn).Methods("POST")
@@ -53,6 +72,18 @@ func registerUIHandlers(r *mux.Router) {
 	r.HandleFunc("/ui/action/hdmi", uiActionHDMI).Methods("POST")
 	r.HandleFunc("/ui/action/nav_key", uiActionNavKey).Methods("POST")
 	r.HandleFunc("/ui/action/mqtt_save", uiActionMQTTSave).Methods("POST")
+
+	// /dev page + its UI fragments and HTMX actions.
+	r.HandleFunc("/dev", devLayoutHandler).Methods("GET")
+	r.HandleFunc("/ui/dev/fragment/banner", uiDevFragmentBanner).Methods("GET")
+	r.HandleFunc("/ui/dev/fragment/devices", uiDevFragmentDevices).Methods("GET")
+	r.HandleFunc("/ui/dev/fragment/trace", uiDevFragmentTrace).Methods("GET")
+	r.HandleFunc("/ui/dev/action/mode", uiDevActionMode).Methods("POST")
+	r.HandleFunc("/ui/dev/action/probe", uiDevActionProbe).Methods("POST")
+	r.HandleFunc("/ui/dev/action/send_key", uiDevActionSendKey).Methods("POST")
+	r.HandleFunc("/ui/dev/action/send_opcode", uiDevActionSendOpcode).Methods("POST")
+	r.HandleFunc("/ui/dev/action/run_strategies", uiDevActionRunStrategies).Methods("POST")
+	r.HandleFunc("/ui/dev/action/save_strategy", uiDevActionSaveStrategy).Methods("POST")
 }
 
 func writeHTMLFragment(w http.ResponseWriter, name string, data interface{}) {
@@ -122,17 +153,66 @@ func buildDeviceRowsFromMaps(devices []map[string]interface{}, own map[int]struc
 			continue
 		}
 		_, isOwn := own[la]
-		rows = append(rows, uiDeviceRow{
-			LogicalAddress:  la,
-			OSDName:         stringFromMap(dm, "osd_name"),
-			AddressName:     stringFromMap(dm, "address_name"),
-			PhysicalAddress: stringFromMap(dm, "physical_address"),
-			PowerStatus:     stringFromMap(dm, "power_status"),
-			IsOwn:           isOwn,
-			IsActiveSource:  (activeLA >= 0 && la == activeLA) || boolFromMap(dm, "is_active_source"),
-		})
+		rows = append(rows, deviceRowFromMap(dm, la, isOwn, activeLA))
 	}
 	return rows
+}
+
+// deviceRowFromMap renders a device payload (whether from /api/devices or
+// the steward snapshot) into a uiDeviceRow. Empty strings are normalized to
+// blank so the template can render a muted placeholder.
+func deviceRowFromMap(dm map[string]interface{}, la int, isOwn bool, activeLA int) uiDeviceRow {
+	discovery := stringFromMap(dm, "discovery")
+	powerStatus := stringFromMap(dm, "power_status")
+	if powerStatus == "" || powerStatus == "Unknown" {
+		// Prefer observed power if libcec hasn't probed yet (ghost device path).
+		if obs := stringFromMap(dm, "observed_power_status"); obs != "" {
+			powerStatus = strings.Title(obs)
+		}
+	}
+
+	row := uiDeviceRow{
+		LogicalAddress:  la,
+		OSDName:         stringFromMap(dm, "osd_name"),
+		AddressName:     stringFromMap(dm, "address_name"),
+		PhysicalAddress: stringFromMap(dm, "physical_address"),
+		PowerStatus:     powerStatus,
+		PowerObservedAt: stringFromMap(dm, "observed_at"),
+		IsOwn:           isOwn,
+		IsActiveSource:  (activeLA >= 0 && la == activeLA) || boolFromMap(dm, "is_active_source"),
+
+		Role:          stringFromMap(dm, "device_type"),
+		HDMIPort:      intFromMap(dm, "hdmi_port"),
+		VendorID:      stringFromMap(dm, "vendor_id"),
+		VendorName:    stringFromMap(dm, "vendor_name"),
+		VendorKnown:   boolFromMap(dm, "vendor_known"),
+		CECVersion:    stringFromMap(dm, "cec_version"),
+		Discovery:     discovery,
+		FirstSeen:     stringFromMap(dm, "first_seen_at"),
+		LastSeen:      stringFromMap(dm, "last_seen_at"),
+		FeatureAbortOpcode: intFromMap(dm, "observed_last_feature_abort_opcode"),
+		FeatureAbortReason: intFromMap(dm, "observed_last_feature_abort_reason"),
+		ObservedAudioMuted: boolFromMap(dm, "observed_audio_muted"),
+		ObservedAudioRaw:   intFromMap(dm, "observed_audio_volume_raw"),
+	}
+
+	row.IsAudioSystem = la == 5
+	row.IsGhost = discovery == "observed"
+
+	// Friendly display name: prefer OSD, then observed OSD fragment, then role.
+	row.DisplayName = row.OSDName
+	if row.DisplayName == "" {
+		row.DisplayName = stringFromMap(dm, "observed_osd_name_fragment")
+	}
+	if row.DisplayName == "" {
+		// Use the role as a placeholder so the card never shows a blank name.
+		if row.Role != "" {
+			row.DisplayName = row.Role
+		} else {
+			row.DisplayName = row.AddressName
+		}
+	}
+	return row
 }
 
 // deviceRowsFromCurrentSnapshot builds device cards from the steward snapshot only (no steward wait).
@@ -144,10 +224,97 @@ func deviceRowsFromCurrentSnapshot() ([]uiDeviceRow, string) {
 	return rows, fmt.Sprintf("Live snapshot (%d devices)", len(rows))
 }
 
+// uiLayoutHandler builds the data for the simplified universal-remote view.
+// Quick-control buttons are pre-rendered server-side from the current bus
+// state but are designed to render even if the bus is empty (HDMI buttons,
+// for example, fall back to a default 1..4 list).
 func uiLayoutHandler(w http.ResponseWriter, r *http.Request) {
-	writeHTMLFragment(w, "layout", map[string]interface{}{
+	writeHTMLFragment(w, "layout", buildRemoteData())
+}
+
+// uiSettingsLayoutHandler renders the dedicated /settings page (MQTT,
+// adapter info, update). The remote is intentionally free of these now.
+func uiSettingsLayoutHandler(w http.ResponseWriter, r *http.Request) {
+	writeHTMLFragment(w, "settings_layout", map[string]interface{}{
 		"Version": version,
 	})
+}
+
+// remoteHDMIDefault is the minimum number of HDMI port buttons we always
+// render, even when the bus topology hasn't reported any ports yet. Keeps
+// the "easily switch HDMI inputs even if other bus devices are not
+// enumerating properly" guarantee true.
+const remoteHDMIDefault = 4
+
+// remoteNavTarget is one entry in the nav-pad target dropdown.
+type remoteNavTarget struct {
+	LA       int
+	Label    string
+	Selected bool
+}
+
+// buildRemoteData assembles the data map consumed by the layout +
+// quick_controls + remote_pad templates. Centralized so all remote
+// fragments stay consistent.
+func buildRemoteData() map[string]interface{} {
+	snap := globalBusState.copySnapshot()
+
+	// HDMI ports: render at least 1..remoteHDMIDefault. If the topology
+	// has reported a higher port count, extend up to that count.
+	hdmiCount := remoteHDMIDefault
+	activeHDMI := 0
+	if c := adapter.Conn(); c != nil {
+		topo := buildBusTopology(c)
+		if int(topo.KnownPortCount) > hdmiCount {
+			hdmiCount = int(topo.KnownPortCount)
+		}
+		// If active source's physical address tells us a port, mark it.
+		if topo.OwnPort > 0 {
+			activeHDMI = int(topo.OwnPort)
+		}
+	}
+	hdmiPorts := make([]int, 0, hdmiCount)
+	for i := 1; i <= hdmiCount; i++ {
+		hdmiPorts = append(hdmiPorts, i)
+	}
+
+	// Nav-pad targets: every device on the bus, with the active source
+	// pre-selected when known. If the bus is empty, list LA 0..4 so the
+	// pad still has something to point at.
+	navTargets := make([]remoteNavTarget, 0, len(snap.Devices)+5)
+	seen := map[int]bool{}
+	for _, dm := range snap.Devices {
+		la, ok := dm["logical_address"].(int)
+		if !ok || seen[la] {
+			continue
+		}
+		seen[la] = true
+		label := stringFromMap(dm, "address_name")
+		if name := stringFromMap(dm, "osd_name"); name != "" {
+			label = name
+		}
+		navTargets = append(navTargets, remoteNavTarget{
+			LA:       la,
+			Label:    label,
+			Selected: snap.ActiveSource >= 0 && snap.ActiveSource == la,
+		})
+	}
+	if len(navTargets) == 0 {
+		for la := 0; la <= 4; la++ {
+			navTargets = append(navTargets, remoteNavTarget{
+				LA:       la,
+				Label:    cec.LogicalAddress(la).String(),
+				Selected: la == 0,
+			})
+		}
+	}
+
+	return map[string]interface{}{
+		"Version":    version,
+		"HDMIPorts":  hdmiPorts,
+		"ActiveHDMI": activeHDMI,
+		"NavTargets": navTargets,
+	}
 }
 
 func uiFragmentBusBanner(w http.ResponseWriter, r *http.Request) {
@@ -205,13 +372,36 @@ func uiFragmentDevices(w http.ResponseWriter, r *http.Request) {
 }
 
 type uiDeviceRow struct {
-	LogicalAddress   int
-	OSDName          string
-	AddressName      string
-	PhysicalAddress  string
-	PowerStatus      string
-	IsOwn            bool
-	IsActiveSource   bool
+	LogicalAddress  int
+	DisplayName     string // best available human name (OSD -> observed -> role)
+	OSDName         string
+	AddressName     string
+	PhysicalAddress string
+	HDMIPort        int
+
+	Role        string // device_type string (TV, Audio System, ...)
+	VendorID    string // "0x000048"
+	VendorName  string
+	VendorKnown bool
+	CECVersion  string
+
+	PowerStatus     string
+	PowerObservedAt string
+
+	Discovery string // "active" | "polled" | "observed"
+	IsGhost   bool   // discovery == "observed"
+	FirstSeen string
+	LastSeen  string
+
+	FeatureAbortOpcode int
+	FeatureAbortReason int
+
+	IsAudioSystem      bool
+	ObservedAudioMuted bool
+	ObservedAudioRaw   int
+
+	IsOwn          bool
+	IsActiveSource bool
 }
 
 func uiFragmentDevicePower(w http.ResponseWriter, r *http.Request) {

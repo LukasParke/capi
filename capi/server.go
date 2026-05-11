@@ -117,4 +117,17 @@ func registerAPIRoutes(r *mux.Router) {
 	// MQTT settings
 	r.HandleFunc("/api/settings/mqtt", getMQTTSettingsHandler).Methods("GET")
 	r.HandleFunc("/api/settings/mqtt", postMQTTSettingsHandler).Methods("POST")
+
+	// Dev / unstable surface (Phase 1+ work). Documented as unstable;
+	// intended for the /dev page and ad-hoc CEC investigation.
+	r.HandleFunc("/api/dev/mode", getDevModeHandler).Methods("GET")
+	r.HandleFunc("/api/dev/mode", postDevModeHandler).Methods("POST")
+	r.HandleFunc("/api/dev/probe", postDevProbeHandler).Methods("POST")
+	r.HandleFunc("/api/dev/send_key", postDevSendKeyHandler).Methods("POST")
+	r.HandleFunc("/api/dev/send_opcode", postDevSendOpcodeHandler).Methods("POST")
+	r.HandleFunc("/api/dev/run_strategies", postDevRunStrategiesHandler).Methods("POST")
+	r.HandleFunc("/api/dev/save_strategy", postDevSaveStrategyHandler).Methods("POST")
+	r.HandleFunc("/api/dev/actions", getDevActionsHandler).Methods("GET")
+	r.HandleFunc("/api/dev/keys", getDevKeysHandler).Methods("GET")
+	r.HandleFunc("/api/dev/opcodes", getDevOpcodesHandler).Methods("GET")
 }

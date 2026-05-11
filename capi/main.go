@@ -84,6 +84,10 @@ func main() {
 	eventHub = NewEventHub(64)
 	logHandler = NewLogHandler()
 
+	// Apply per-vendor strategy overrides loaded from config.json into the
+	// process-wide defaultRegistry before any handler can fire.
+	applyPersistedStrategyOverrides()
+
 	// Background workers that don't need the adapter to be ready.
 	startBusStewardIfNeeded()
 	go runBusTopologyWorkerLoop()

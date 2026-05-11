@@ -1,0 +1,221 @@
+{{define "dev_layout"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>capi dev</title>
+  <link rel="stylesheet" href="/ui/static/style.css">
+  <script src="/ui/static/htmx.min.js"></script>
+</head>
+<body class="dev">
+  <h1>
+    capi dev
+    <span class="badge off" style="font-size:.7rem">v {{.Version}}</span>
+    <a href="/" style="font-size:.75rem;color:var(--muted);margin-left:auto">&larr; back to dashboard</a>
+  </h1>
+
+  <div id="dev-banner"
+       hx-get="/ui/dev/fragment/banner"
+       hx-trigger="load, every 4s, refresh from:body"
+       hx-swap="innerHTML"></div>
+
+  <div class="grid">
+    <div class="card full" id="dev-devices-card"
+         hx-get="/ui/dev/fragment/devices"
+         hx-trigger="load, every 6s, refresh from:body"
+         hx-swap="innerHTML"></div>
+
+    <div class="card" id="dev-send-key-card">
+      {{template "dev_send_key" .}}
+    </div>
+
+    <div class="card" id="dev-send-opcode-card">
+      {{template "dev_send_opcode" .}}
+    </div>
+
+    <div class="card full" id="dev-strategy-card">
+      {{template "dev_strategy_bench" .}}
+    </div>
+
+    <div class="card full" id="dev-trace-card"
+         hx-get="/ui/dev/fragment/trace"
+         hx-trigger="load, every 3s"
+         hx-swap="innerHTML"></div>
+  </div>
+
+  <div id="dev-result" class="result" style="margin-top:12px"></div>
+</body>
+</html>
+{{end}}
+
+{{define "dev_banner"}}
+<div class="dev-banner">
+  <span><strong>Mode:</strong>
+    <select id="dev-mode-select"
+            hx-post="/ui/dev/action/mode"
+            hx-trigger="change"
+            hx-target="#dev-result"
+            hx-swap="innerHTML"
+            name="mode">
+      <option value="passive" {{if eq .Mode "passive"}}selected{{end}}>passive</option>
+      <option value="monitor_only" {{if eq .Mode "monitor_only"}}selected{{end}}>monitor_only</option>
+    </select>
+    <span class="muted">live: {{.LiveMode}}</span>
+  </span>
+  <span style="margin-left:18px"><strong>Devices:</strong> {{.Devices}}</span>
+  <span style="margin-left:18px"><strong>Frames captured:</strong> {{.FrameCount}}/{{.FrameRing}}</span>
+  <span style="margin-left:18px"><strong>Active source:</strong> LA {{.ActiveSrc}}</span>
+</div>
+{{end}}
+
+{{define "dev_devices"}}
+<h2>Devices on bus</h2>
+{{if .Devices}}
+<div class="device-grid">
+  {{range .Devices}}
+  <div class="dev-card{{if .IsActiveSource}} active-src{{end}}{{if .IsGhost}} ghost{{end}}">
+    <div class="dev-name">
+      {{.DisplayName}}
+      {{if .IsOwn}}<span class="badge off" style="font-size:.65rem">this adapter</span>{{end}}
+      {{if .IsActiveSource}}<span class="badge ok" style="font-size:.65rem">active source</span>{{end}}
+      {{if .IsGhost}}<span class="badge warn" style="font-size:.65rem">observed only</span>{{end}}
+    </div>
+    <dl class="dev-fields">
+      <dt>Role</dt><dd>{{if .Role}}{{.Role}}{{else}}<span class="muted">unknown</span>{{end}} <span class="muted">(LA {{.LogicalAddress}})</span></dd>
+      {{if .VendorID}}<dt>Vendor</dt><dd>{{if .VendorKnown}}{{.VendorName}}{{else}}<span class="muted">{{.VendorID}} - unknown OUI</span>{{end}}</dd>{{end}}
+      <dt>Physical addr</dt><dd>{{if .PhysicalAddress}}{{.PhysicalAddress}}{{else}}<span class="muted">not reported</span>{{end}}{{if gt .HDMIPort 0}} <span class="muted">(HDMI {{.HDMIPort}})</span>{{end}}</dd>
+      <dt>CEC version</dt><dd>{{if and .CECVersion (ne .CECVersion "Unknown")}}{{.CECVersion}}{{else}}<span class="muted">not reported</span>{{end}}</dd>
+      <dt>Power</dt><dd>{{if .PowerStatus}}{{.PowerStatus}}{{else}}<span class="muted">unknown</span>{{end}}</dd>
+      {{if .LastSeen}}<dt>Last seen</dt><dd><span class="muted">{{.LastSeen}}</span></dd>{{end}}
+      {{if gt .FeatureAbortOpcode 0}}<dt>Feature abort</dt><dd><span class="muted">opcode 0x{{printf "%02X" .FeatureAbortOpcode}}</span></dd>{{end}}
+    </dl>
+    <div class="dev-actions">
+      <button type="button" class="sm" hx-post="/ui/dev/action/probe?addr={{.LogicalAddress}}&kind=all" hx-target="#dev-result" hx-swap="innerHTML">Probe all</button>
+      <button type="button" class="sm" hx-post="/ui/dev/action/probe?addr={{.LogicalAddress}}&kind=power" hx-target="#dev-result" hx-swap="innerHTML">Power</button>
+      <button type="button" class="sm" hx-post="/ui/dev/action/probe?addr={{.LogicalAddress}}&kind=vendor" hx-target="#dev-result" hx-swap="innerHTML">Vendor</button>
+      <button type="button" class="sm" hx-post="/ui/dev/action/probe?addr={{.LogicalAddress}}&kind=osd" hx-target="#dev-result" hx-swap="innerHTML">OSD</button>
+      <button type="button" class="sm" hx-post="/ui/dev/action/probe?addr={{.LogicalAddress}}&kind=cec_version" hx-target="#dev-result" hx-swap="innerHTML">CEC ver</button>
+      <button type="button" class="sm" hx-post="/ui/dev/action/probe?addr={{.LogicalAddress}}&kind=audio" hx-target="#dev-result" hx-swap="innerHTML">Audio</button>
+    </div>
+  </div>
+  {{end}}
+</div>
+{{else}}
+<p class="muted">No devices yet. Pi has just booted? Wait for first scan or call POST /api/bus/scan.</p>
+{{end}}
+{{end}}
+
+{{define "dev_send_key"}}
+<h2>Send key (blind)</h2>
+<p style="font-size:.72rem;color:var(--muted);margin-bottom:8px">
+  Targets any LA 0..14 even when libcec doesn't list it as active. Useful for chasing devices behind a non-bridging display.
+</p>
+<form id="dev-send-key-frm" class="form-group" style="display:grid;gap:8px">
+  <label>Destination LA
+    <select name="addr">
+      {{range $i, $_ := iterRange 15}}<option value="{{$i}}">{{$i}}</option>{{end}}
+    </select>
+  </label>
+  <label>Key
+    <select name="key">
+      {{range .KeyNames}}<option value="{{.}}">{{.}}</option>{{end}}
+    </select>
+  </label>
+  <label>Hold (ms) <input type="number" name="hold_ms" value="100" min="0" max="2000"></label>
+  <label>Repeat <input type="number" name="repeat" value="1" min="1" max="32"></label>
+  <label><input type="checkbox" name="wait" checked> wait for ACK</label>
+</form>
+<div class="btn-row">
+  <button type="button" hx-post="/ui/dev/action/send_key" hx-include="#dev-send-key-frm" hx-target="#dev-result" hx-swap="innerHTML">Send</button>
+</div>
+{{end}}
+
+{{define "dev_send_opcode"}}
+<h2>Send raw opcode (blind)</h2>
+<form id="dev-send-op-frm" class="form-group" style="display:grid;gap:8px">
+  <label>Destination LA
+    <select name="dest">
+      {{range $i, $_ := iterRange 16}}<option value="{{$i}}">{{$i}}</option>{{end}}
+    </select>
+  </label>
+  <label>Opcode
+    <select name="opcode">
+      {{range .Opcodes}}<option value="{{.Opcode}}">{{.Hex}} {{.Name}}</option>{{end}}
+    </select>
+  </label>
+  <label>Params (hex bytes, e.g. "01 02 ff")
+    <input type="text" name="params_hex" placeholder="">
+  </label>
+</form>
+<div class="btn-row">
+  <button type="button" hx-post="/ui/dev/action/send_opcode" hx-include="#dev-send-op-frm" hx-target="#dev-result" hx-swap="innerHTML">Transmit</button>
+</div>
+{{end}}
+
+{{define "dev_strategy_bench"}}
+<h2>Strategy bench</h2>
+<p style="font-size:.72rem;color:var(--muted);margin-bottom:8px">
+  Runs every strategy in the chain for an action and reports per-strategy outcome (ack / reply opcode / feature abort).
+  "Save winner" persists a per-vendor override into <code>config.json</code>.
+</p>
+<form id="dev-bench-frm" class="form-group" style="display:grid;gap:8px;grid-template-columns:1fr 1fr;align-items:end">
+  <label>Action
+    <select name="action">
+      {{range .Actions}}<option value="{{.}}">{{.}}</option>{{end}}
+    </select>
+  </label>
+  <label>Target LA (blank = strategy default)
+    <input type="number" name="target" min="0" max="14" placeholder="">
+  </label>
+  <label>Observe (ms)
+    <input type="number" name="observe_ms" value="500" min="100" max="5000">
+  </label>
+  <label><input type="checkbox" name="all_strategies" value="1" checked> run all strategies</label>
+</form>
+<div class="btn-row">
+  <button type="button" hx-post="/ui/dev/action/run_strategies" hx-include="#dev-bench-frm" hx-target="#dev-bench-result" hx-swap="innerHTML">Run</button>
+</div>
+<div id="dev-bench-result" style="margin-top:8px"></div>
+{{end}}
+
+{{define "dev_strategy_results"}}
+<table class="dev-table">
+  <thead><tr><th>#</th><th>Strategy</th><th>Status</th><th>Ack</th><th>Reply</th><th>Abort opcode</th><th>Elapsed</th><th></th></tr></thead>
+  <tbody>
+    {{range $i, $r := .Results}}
+    <tr class="dev-strat-{{$r.Status}}">
+      <td>{{add $i 1}}</td>
+      <td><code>{{$r.Strategy}}</code></td>
+      <td>{{$r.Status}}</td>
+      <td>{{if $r.Acked}}yes{{else}}no{{end}}</td>
+      <td>{{if $r.ReplyName}}{{$r.ReplyName}}{{else}}-{{end}}</td>
+      <td>{{if gt $r.AbortOpcode 0}}0x{{printf "%02X" $r.AbortOpcode}}{{else}}-{{end}}</td>
+      <td>{{$r.ElapsedMs}}ms</td>
+      <td>
+        <button type="button" class="sm"
+                hx-post="/ui/dev/action/save_strategy?vendor={{$.Vendor}}&action={{$.Action}}&strategy={{$r.Strategy}}"
+                hx-target="#dev-result" hx-swap="innerHTML">Save winner</button>
+      </td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{if .Vendor}}<p class="muted" style="font-size:.7rem;margin-top:6px">Vendor for target: {{.Vendor}}</p>{{end}}
+{{end}}
+
+{{define "dev_trace"}}
+<h2>Live frame trace <span class="muted" style="font-size:.7rem">{{.Count}} of {{.Cap}} captured</span></h2>
+{{if .Frames}}
+<table class="dev-trace">
+  <thead><tr><th>Time</th><th>Init</th><th>Dest</th><th>Opcode</th><th>Params</th></tr></thead>
+  <tbody>
+    {{range .Frames}}
+    <tr><td><span class="muted">{{.Timestamp}}</span></td><td>{{.Initiator}}</td><td>{{.Destination}}</td><td><code>{{.Opcode}}</code></td><td><code class="muted">{{range .ParamsHex}}{{.}} {{end}}</code></td></tr>
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="muted">No frames captured. Enable monitor mode (-cec-monitor) or set bus.frame_ring_size in config.json to populate this.</p>
+{{end}}
+{{end}}

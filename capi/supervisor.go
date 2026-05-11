@@ -104,9 +104,16 @@ func openCECSession(ctx context.Context, deviceName, requestedAdapter string, mo
 		return nil, false, nil
 	}
 
-	conn, err := cec.OpenWith(cec.NewConfiguration(deviceName, cec.DeviceTypeRecordingDevice), cec.Options{
-		EventBuffer: 512,
-	})
+	cecCfg := cec.NewConfiguration(deviceName, cec.DeviceTypeRecordingDevice)
+	configMu.RLock()
+	persisted := currentConfig.CEC
+	configMu.RUnlock()
+	cecCfg.MonitorOnly = persisted.MonitorOnly
+	cecCfg.ActivateSource = persisted.ActivateSource
+	cecCfg.WakeDevices = intsToLogicalAddrs(persisted.WakeOnConnect)
+	cecCfg.PowerOffDevices = intsToLogicalAddrs(persisted.PowerOffOnDisconnect)
+
+	conn, err := cec.OpenWith(cecCfg, cec.Options{EventBuffer: 512})
 	if err != nil {
 		return nil, false, err
 	}
@@ -232,6 +239,22 @@ func drain(ch <-chan struct{}) {
 			return
 		}
 	}
+}
+
+// intsToLogicalAddrs converts a JSON-friendly []int to []cec.LogicalAddress,
+// dropping anything outside 0..14.
+func intsToLogicalAddrs(in []int) []cec.LogicalAddress {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]cec.LogicalAddress, 0, len(in))
+	for _, v := range in {
+		if v < 0 || v > 14 {
+			continue
+		}
+		out = append(out, cec.LogicalAddress(v))
+	}
+	return out
 }
 
 var _ = log.Println // retain log import for potential future use

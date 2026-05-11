@@ -343,6 +343,9 @@ func (c *Connection) Transmit(cmd *Command) error {
 	if cmd == nil {
 		return fmt.Errorf("%w: nil command", ErrTransmitFailed)
 	}
+	if c.IsMonitorOnly() {
+		return ErrMonitorOnly
+	}
 	if err := c.guard(); err != nil {
 		return err
 	}
@@ -371,6 +374,9 @@ func (c *Connection) SendKeypress(address LogicalAddress, key Keycode, wait bool
 	if !address.IsValid() {
 		return ErrInvalidLogicalAddress
 	}
+	if c.IsMonitorOnly() {
+		return ErrMonitorOnly
+	}
 	if err := c.guard(); err != nil {
 		return err
 	}
@@ -390,6 +396,9 @@ func (c *Connection) SendKeypress(address LogicalAddress, key Keycode, wait bool
 func (c *Connection) SendKeyRelease(address LogicalAddress, wait bool) error {
 	if !address.IsValid() {
 		return ErrInvalidLogicalAddress
+	}
+	if c.IsMonitorOnly() {
+		return ErrMonitorOnly
 	}
 	if err := c.guard(); err != nil {
 		return err
@@ -450,8 +459,9 @@ func (c *Connection) GetLibInfo() string {
 
 // SetConfiguration replaces the running libcec configuration. It re-attaches
 // the cec package's internal callback table so events keep flowing after the
-// swap. cfg.DeviceName, DeviceType, PhysicalAddress, BaseDevice, HDMIPort and
-// ClientVersion are honored.
+// swap, and applies the same passive defaults as OpenWith (no active-source
+// claim, no wake on connect, no standby broadcast on disconnect) unless the
+// caller explicitly opts in via cfg.{ActivateSource,WakeDevices,...}.
 func (c *Connection) SetConfiguration(cfg *Configuration) error {
 	if cfg == nil {
 		return fmt.Errorf("cec: nil Configuration")
@@ -462,17 +472,8 @@ func (c *Connection) SetConfiguration(cfg *Configuration) error {
 	defer c.apiMu.Unlock()
 
 	cConfig := C.libcec_configuration{}
-	C.libcec_clear_configuration(&cConfig)
-
-	cName := C.CString(cfg.DeviceName)
+	cName := buildLibCECConfig(&cConfig, cfg)
 	defer C.free(unsafe.Pointer(cName))
-	C.strncpy(&cConfig.strDeviceName[0], cName, C.LIBCEC_OSD_NAME_SIZE-1)
-
-	cConfig.deviceTypes.types[0] = C.cec_device_type(cfg.DeviceType)
-	cConfig.iPhysicalAddress = C.uint16_t(cfg.PhysicalAddress)
-	cConfig.baseDevice = C.cec_logical_address(cfg.BaseDevice)
-	cConfig.iHDMIPort = C.uint8_t(cfg.HDMIPort)
-	cConfig.clientVersion = C.uint32_t(cfg.ClientVersion)
 
 	C.cec_install_callbacks(&cConfig, C.uintptr_t(c.cgoHandle))
 

@@ -186,16 +186,30 @@ func (c *Connection) SendImageViewOn() error {
 	})
 }
 
-// SwitchToHDMIPort switches the TV input to the given HDMI port. It first
-// nudges the TV awake with Image View On, then uses libcec's SetHDMIPort
-// (preferred), falling back to an Active Source broadcast.
-func (c *Connection) SwitchToHDMIPort(port uint8) error {
+// SwitchOptions tweaks the source-switch helpers.
+type SwitchOptions struct {
+	// WakeFirst sends an ImageViewOn to the TV before the switch. Off by
+	// default - many displays will switch input correctly without being
+	// pre-woken, and ImageViewOn changes the bus state.
+	WakeFirst bool
+	// WakeSettle is how long to wait after WakeFirst before issuing the
+	// switch command (default 300ms when WakeFirst is true).
+	WakeSettle time.Duration
+}
+
+// SwitchToHDMIPort switches the TV input to the given HDMI port via
+// libcec's SetHDMIPort (preferred), falling back to an Active Source
+// broadcast. Pass SwitchOptions{WakeFirst: true} to send ImageViewOn first
+// for displays that ignore source switches while in standby.
+func (c *Connection) SwitchToHDMIPort(port uint8, opts ...SwitchOptions) error {
 	if port < 1 || port > 15 {
 		return ErrInvalidHDMIPort
 	}
-	_ = c.SendImageViewOn()
-	time.Sleep(300 * time.Millisecond)
-
+	o := mergeSwitchOpts(opts)
+	if o.WakeFirst {
+		_ = c.SendImageViewOn()
+		time.Sleep(o.WakeSettle)
+	}
 	if err := c.SetHDMIPort(LogicalAddressTV, port); err == nil {
 		return nil
 	}
@@ -211,13 +225,16 @@ func (c *Connection) SwitchToHDMIPort(port uint8) error {
 
 // SwitchToDevice broadcasts Active Source for the given device's physical
 // address, prompting the TV to switch input to that device's HDMI port.
-func (c *Connection) SwitchToDevice(address LogicalAddress) error {
+// Pass SwitchOptions{WakeFirst: true} to send ImageViewOn first.
+func (c *Connection) SwitchToDevice(address LogicalAddress, opts ...SwitchOptions) error {
 	if !address.IsValid() {
 		return ErrInvalidLogicalAddress
 	}
-	_ = c.SendImageViewOn()
-	time.Sleep(300 * time.Millisecond)
-
+	o := mergeSwitchOpts(opts)
+	if o.WakeFirst {
+		_ = c.SendImageViewOn()
+		time.Sleep(o.WakeSettle)
+	}
 	phys, err := c.GetDevicePhysicalAddress(address)
 	if err != nil {
 		return fmt.Errorf("switch to %d: %w", address, err)
@@ -231,6 +248,17 @@ func (c *Connection) SwitchToDevice(address LogicalAddress) error {
 	})
 }
 
+func mergeSwitchOpts(opts []SwitchOptions) SwitchOptions {
+	out := SwitchOptions{}
+	if len(opts) > 0 {
+		out = opts[0]
+	}
+	if out.WakeFirst && out.WakeSettle <= 0 {
+		out.WakeSettle = 300 * time.Millisecond
+	}
+	return out
+}
+
 // SendVolumeKey sends a volume keypress directly to a specific device,
 // holding it long enough to be registered, then releases.
 func (c *Connection) SendVolumeKey(address LogicalAddress, key Keycode) error {
@@ -241,17 +269,18 @@ func (c *Connection) SendVolumeKey(address LogicalAddress, key Keycode) error {
 	return c.SendKeyRelease(address, true)
 }
 
-// nudgeSetSystemAudioMode hints to the TV that system-audio mode should be
-// on. Many AVRs only forward volume after this. Errors are ignored - many
-// TVs feature-abort.
-func (c *Connection) nudgeSetSystemAudioMode(on bool) {
-	own := c.ownAddress()
+// SetSystemAudioMode sends Set System Audio Mode (0x72) to the TV asking it
+// to enable (on=true) or disable (on=false) AVR pass-through. Many AVRs
+// only forward volume keys after this; many TVs without an AVR feature-abort
+// it. Exposed as an explicit opcode so callers know they're changing bus
+// state - the cec package never sends this implicitly.
+func (c *Connection) SetSystemAudioMode(on bool) error {
 	b := byte(0)
 	if on {
 		b = 1
 	}
-	_ = c.Transmit(&Command{
-		Initiator:   own,
+	return c.Transmit(&Command{
+		Initiator:   c.ownAddress(),
 		Destination: LogicalAddressTV,
 		Opcode:      OpcodeSetSystemAudioMode,
 		OpcodeSet:   true,
@@ -259,7 +288,21 @@ func (c *Connection) nudgeSetSystemAudioMode(on bool) {
 	})
 }
 
-// volumePassThroughOrder returns the logical-address order to try for
+// VolumeOptions tweaks the *BestEffort volume helpers.
+type VolumeOptions struct {
+	// EnableSAM sends SetSystemAudioMode(true) before trying the volume
+	// keys. Off by default; required for most AVRs to forward volume keys
+	// to the AudioSystem; pointless and noisy on TV-only buses.
+	EnableSAM bool
+	// SAMSettle is how long to wait after EnableSAM before sending volume
+	// keys (default 80ms when EnableSAM is true).
+	SAMSettle time.Duration
+	// Targets overrides the destination chain. Empty = default chain
+	// (AudioSystem, TV, PlaybackDevice1, PlaybackDevice2).
+	Targets []LogicalAddress
+}
+
+// volumePassThroughOrder returns the default destination order for
 // best-effort volume routing.
 func volumePassThroughOrder() []LogicalAddress {
 	return []LogicalAddress{
@@ -270,50 +313,63 @@ func volumePassThroughOrder() []LogicalAddress {
 	}
 }
 
-// VolumeUpBestEffort tries CEC user-control volume on common destinations,
-// then falls back to libcec_volume_up.
-func (c *Connection) VolumeUpBestEffort(sendRelease bool) error {
-	c.nudgeSetSystemAudioMode(true)
-	time.Sleep(80 * time.Millisecond)
-	for _, dest := range volumePassThroughOrder() {
-		if dest == c.ownAddress() {
+func mergeVolumeOpts(opts []VolumeOptions) VolumeOptions {
+	out := VolumeOptions{}
+	if len(opts) > 0 {
+		out = opts[0]
+	}
+	if out.EnableSAM && out.SAMSettle <= 0 {
+		out.SAMSettle = 80 * time.Millisecond
+	}
+	if len(out.Targets) == 0 {
+		out.Targets = volumePassThroughOrder()
+	}
+	return out
+}
+
+// volumeBestEffort is the shared implementation for VolumeUp/Down/Mute.
+func (c *Connection) volumeBestEffort(key Keycode, opts VolumeOptions, fallback func() error) error {
+	if opts.EnableSAM {
+		_ = c.SetSystemAudioMode(true)
+		time.Sleep(opts.SAMSettle)
+	}
+	own := c.ownAddress()
+	for _, dest := range opts.Targets {
+		if dest == own {
 			continue
 		}
-		if err := c.SendVolumeKey(dest, KeycodeVolumeUp); err == nil {
+		if err := c.SendVolumeKey(dest, key); err == nil {
 			return nil
 		}
 	}
-	return c.VolumeUp(sendRelease)
+	if fallback != nil {
+		return fallback()
+	}
+	return ErrTransmitFailed
+}
+
+// VolumeUpBestEffort tries CEC user-control VolumeUp on common destinations,
+// then falls back to libcec_volume_up. Pass VolumeOptions{EnableSAM: true}
+// for AVR setups; the default sends nothing extra to the bus.
+func (c *Connection) VolumeUpBestEffort(sendRelease bool, opts ...VolumeOptions) error {
+	return c.volumeBestEffort(KeycodeVolumeUp, mergeVolumeOpts(opts), func() error {
+		return c.VolumeUp(sendRelease)
+	})
 }
 
 // VolumeDownBestEffort mirrors VolumeUpBestEffort.
-func (c *Connection) VolumeDownBestEffort(sendRelease bool) error {
-	c.nudgeSetSystemAudioMode(true)
-	time.Sleep(80 * time.Millisecond)
-	for _, dest := range volumePassThroughOrder() {
-		if dest == c.ownAddress() {
-			continue
-		}
-		if err := c.SendVolumeKey(dest, KeycodeVolumeDown); err == nil {
-			return nil
-		}
-	}
-	return c.VolumeDown(sendRelease)
+func (c *Connection) VolumeDownBestEffort(sendRelease bool, opts ...VolumeOptions) error {
+	return c.volumeBestEffort(KeycodeVolumeDown, mergeVolumeOpts(opts), func() error {
+		return c.VolumeDown(sendRelease)
+	})
 }
 
-// MuteBestEffort tries user-control mute on common targets, then libcec toggle.
-func (c *Connection) MuteBestEffort() error {
-	c.nudgeSetSystemAudioMode(true)
-	time.Sleep(80 * time.Millisecond)
-	for _, dest := range volumePassThroughOrder() {
-		if dest == c.ownAddress() {
-			continue
-		}
-		if err := c.SendVolumeKey(dest, KeycodeMute); err == nil {
-			return nil
-		}
-	}
-	return c.AudioToggleMute()
+// MuteBestEffort tries user-control mute on common targets, then falls back
+// to libcec_audio_toggle_mute.
+func (c *Connection) MuteBestEffort(opts ...VolumeOptions) error {
+	return c.volumeBestEffort(KeycodeMute, mergeVolumeOpts(opts), func() error {
+		return c.AudioToggleMute()
+	})
 }
 
 // LogicalAddressesWithOptionalPoll returns libcec's active logical addresses
@@ -387,6 +443,7 @@ func DeviceTypeForAddress(addr LogicalAddress) DeviceType {
 // init time so GetVendorName allocates nothing on the hot path.
 var vendorNames = map[uint64]string{
 	0x000039: "Toshiba",
+	0x000048: "LG",     // observed on LG projectors; OUI variant of 0x009053
 	0x0000F0: "Samsung",
 	0x0005CD: "Denon",
 	0x000678: "Marantz",
@@ -420,6 +477,14 @@ func GetVendorName(vendorId uint64) string {
 		return name
 	}
 	return fmt.Sprintf("Unknown (0x%06X)", vendorId)
+}
+
+// IsKnownVendor reports whether vendorId is in our vendor table. Useful for
+// callers that want to flag unknown OUIs in UI / logs without parsing the
+// "Unknown (...)" string from GetVendorName.
+func IsKnownVendor(vendorId uint64) bool {
+	_, ok := vendorNames[vendorId]
+	return ok
 }
 
 // PhysicalAddressToString converts a packed physical address into dotted form

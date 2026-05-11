@@ -28,12 +28,13 @@ type VendorProfile struct {
 
 // BusConfig is persisted under config.json "bus".
 type BusConfig struct {
-	ReconcileIntervalSec int                       `json:"reconcile_interval_sec"`
-	DeepSettleMs         int                       `json:"deep_settle_ms"`
-	RescanExtraSettleMs  int                       `json:"rescan_extra_settle_ms"`
-	StaleThresholdSec    int                       `json:"stale_threshold_sec"`
-	FrameRingSize        int                       `json:"frame_ring_size"`
-	MonitorFromConfig    *bool                     `json:"monitor,omitempty"` // nil = use CLI only; true/false override
+	ReconcileIntervalSec int                      `json:"reconcile_interval_sec"`
+	DeepSettleMs         int                      `json:"deep_settle_ms"`
+	RescanExtraSettleMs  int                      `json:"rescan_extra_settle_ms"`
+	StaleThresholdSec    int                      `json:"stale_threshold_sec"`
+	StaleDeviceTTLSec    int                      `json:"stale_device_ttl_sec"`
+	FrameRingSize        int                      `json:"frame_ring_size"`
+	MonitorFromConfig    *bool                    `json:"monitor,omitempty"` // nil = use CLI only; true/false override
 	VendorProfiles       map[string]VendorProfile `json:"vendor_profiles"`
 }
 
@@ -66,10 +67,31 @@ func (b BusConfig) staleThreshold() time.Duration {
 }
 
 func (b BusConfig) frameRingSize() int {
+	// Negative explicitly disables the ring (callers can opt out for the
+	// minimum-allocation case). Zero (the unset default) maps to 256: the
+	// dev UI strategy bench and probe handlers diff this ring to classify
+	// outcomes, so the out-of-the-box experience is broken without it.
+	// The cost of a 256-entry ring is trivial (~30KB max).
 	if b.FrameRingSize < 0 {
 		return 0
 	}
+	if b.FrameRingSize == 0 {
+		return 256
+	}
 	return b.FrameRingSize
+}
+
+// staleDeviceTTL controls how long a device that hasn't initiated any CEC
+// frame stays in the ghost-device list. Defaults to 10 minutes; set to a
+// negative number to disable pruning.
+func (b BusConfig) staleDeviceTTL() time.Duration {
+	if b.StaleDeviceTTLSec < 0 {
+		return 0 // disabled
+	}
+	if b.StaleDeviceTTLSec == 0 {
+		return 10 * time.Minute
+	}
+	return time.Duration(b.StaleDeviceTTLSec) * time.Second
 }
 
 // BusStateSnapshot is returned by GET /api/bus/state (JSON-friendly).
@@ -96,10 +118,14 @@ type busStateStore struct {
 	frameRing      []BusFrameEntry
 	frameRingCap   int
 	observedByAddr map[int]map[string]interface{} // merged into devices on each rebuild
+	firstSeenAt    map[int]time.Time              // first observed CEC frame from this initiator (LA)
+	lastSeenAt     map[int]time.Time              // most recent observed CEC frame from this LA
 }
 
 var globalBusState = &busStateStore{
 	observedByAddr: make(map[int]map[string]interface{}),
+	firstSeenAt:    make(map[int]time.Time),
+	lastSeenAt:     make(map[int]time.Time),
 	snap: BusStateSnapshot{
 		ActiveSource: -1,
 	},
@@ -250,13 +276,82 @@ func (s *busStateStore) mergeObservedIntoDevices(devices []map[string]interface{
 }
 
 func (s *busStateStore) recordObserved(addr int, key string, value interface{}) {
+	now := time.Now().UTC()
 	s.mu.Lock()
 	if s.observedByAddr[addr] == nil {
 		s.observedByAddr[addr] = make(map[string]interface{})
 	}
 	s.observedByAddr[addr][key] = value
-	s.observedByAddr[addr]["observed_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	s.observedByAddr[addr]["observed_at"] = now.Format(time.RFC3339Nano)
+	if _, ok := s.firstSeenAt[addr]; !ok {
+		s.firstSeenAt[addr] = now
+	}
+	s.lastSeenAt[addr] = now
 	s.mu.Unlock()
+}
+
+// noteSeen marks an LA as having been observed initiating a CEC frame at the
+// given time, without recording any specific field. Called from the command
+// callback so we capture every initiator we've ever seen, including ones
+// that we wouldn't otherwise call recordObserved for.
+func (s *busStateStore) noteSeen(addr int) {
+	if addr < 0 || addr > 14 {
+		return
+	}
+	now := time.Now().UTC()
+	s.mu.Lock()
+	if _, ok := s.firstSeenAt[addr]; !ok {
+		s.firstSeenAt[addr] = now
+	}
+	s.lastSeenAt[addr] = now
+	s.mu.Unlock()
+}
+
+// pruneStaleObserved drops observed entries (and their first/last seen
+// timestamps) whose lastSeenAt is older than ttl. Called from the steward
+// before each device-list rebuild. ttl <= 0 disables pruning.
+func (s *busStateStore) pruneStaleObserved(ttl time.Duration) {
+	if ttl <= 0 {
+		return
+	}
+	cutoff := time.Now().UTC().Add(-ttl)
+	s.mu.Lock()
+	for addr, t := range s.lastSeenAt {
+		if t.Before(cutoff) {
+			delete(s.lastSeenAt, addr)
+			delete(s.firstSeenAt, addr)
+			delete(s.observedByAddr, addr)
+		}
+	}
+	s.mu.Unlock()
+}
+
+// observedAddresses returns LAs we have ever recorded observed traffic from
+// (the union of recordObserved + noteSeen entries).
+func (s *busStateStore) observedAddresses() []int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]int, 0, len(s.lastSeenAt))
+	for addr := range s.lastSeenAt {
+		out = append(out, addr)
+	}
+	return out
+}
+
+// seenTimestamps returns a copy of the first/last seen maps for use by the
+// device-list builder.
+func (s *busStateStore) seenTimestamps() (first, last map[int]time.Time) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	first = make(map[int]time.Time, len(s.firstSeenAt))
+	last = make(map[int]time.Time, len(s.lastSeenAt))
+	for k, v := range s.firstSeenAt {
+		first[k] = v
+	}
+	for k, v := range s.lastSeenAt {
+		last[k] = v
+	}
+	return
 }
 
 func uint16FromParamsBE(p []uint8) (uint16, bool) {
@@ -367,4 +462,12 @@ func (s *busStateStore) setFrameRingCapacity(cap int) {
 		s.frameRing = nil
 	}
 	s.mu.Unlock()
+}
+
+// frameRingCapacity returns the currently-configured frame ring capacity.
+// 0 means the ring is disabled (no frames will be captured).
+func (s *busStateStore) frameRingCapacity() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.frameRingCap
 }
