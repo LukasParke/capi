@@ -149,7 +149,8 @@ jobs:
           VERSION: ${{ needs.tag.outputs.version }}
         run: |
           set -euo pipefail
-          docker run --rm \
+          # -i: forward stdin; bash -s reads the heredoc script from it
+          docker run --rm -i \
             --platform "$PLATFORM" \
             -v "${GITHUB_WORKSPACE}:/workspace" \
             -w /workspace \
@@ -204,6 +205,7 @@ jobs:
         with:
           name: ${{ matrix.binary }}
           path: ${{ matrix.binary }}
+          if-no-files-found: error
 
   release:
     needs: [tag, build]

@@ -85,7 +85,7 @@ mkdir -p dist
 OUT="dist/capi-linux-${ARCH}-libcec${LIBCEC}"
 
 echo "==> building $OUT (version $VERSION)"
-docker run --rm --platform="$PLATFORM" \
+docker run --rm -i --platform="$PLATFORM" \
   -v "$ROOT:/workspace" \
   -v capi-rustup-cache:/usr/local/rustup \
   -v capi-cargo-cache:/usr/local/cargo \
