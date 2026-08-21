@@ -1,0 +1,12 @@
+{% for d in ctx.devices %}
+<div class="power-cell" data-power-cell data-la="{{ d.logical_address }}">
+  {% if d.power_status == "on" %}
+  <span class="badge badge-ok" data-power-badge>On</span>
+  {% else %}{% if d.power_status == "standby" %}
+  <span class="badge badge-warn" data-power-badge>Standby</span>
+  {% else %}
+  <span class="badge badge-dim" data-power-badge>Unknown</span>
+  {% endif %}{% endif %}
+  <span class="dim small">LA {{ d.logical_address }}</span>
+</div>
+{% endfor %}

@@ -1,0 +1,16 @@
+<section class="card">
+  <header class="card-head">
+    <h2>Source</h2>
+    {% if ctx.banner.active_source >= 0 %}<span class="pill pill-dim"><span class="dot"></span>Active LA {{ ctx.banner.active_source }}</span>{% endif %}
+  </header>
+  {% if ctx.hdmi_ports.is_empty() %}
+  <p class="dim">HDMI port count not known yet &mdash; run a scan.</p>
+  {% else %}
+  <div class="port-strip" role="group" aria-label="Switch HDMI input">
+    {% for p in ctx.hdmi_ports %}
+    <button type="button" class="port-chip{% if p.selected %} is-selected{% endif %}" aria-pressed="{% if p.selected %}true{% else %}false{% endif %}"
+            hx-post="/ui/action/hdmi" hx-vals='{"port":{{ p.port }}}' hx-swap="none">HDMI {{ p.port }}</button>
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>

@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Cross-build capi locally, scp the binary to a Raspberry Pi, restart the
 # service, and report health. Designed for the fast dev iteration loop:
-# edit code → make push-pi → check Pi.
+# edit code → scripts/push-pi.sh → check Pi.
 #
 # Reads .env from the repo root. Required:
 #   SSH_USER, SSH_IP
 # Optional:
 #   SSH_PASSWORD       use sshpass-style auth instead of SSH keys
+#                      (passed to sshpass via the SSHPASS environment variable,
+#                      NOT via the command line, so it never shows up in argv
+#                      or process listings)
 #   SUDO_PASSWORD      defaults to SSH_PASSWORD; needed for sudo -S on the Pi
 #   PI_ARCH            arm64 (default) | armv6
 #   PI_LIBCEC          6 (default) | 7
@@ -22,10 +25,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-if [[ -f .env ]]; then
-  # shellcheck disable=SC1091
-  set -a; source .env; set +a
+if [[ ! -f .env ]]; then
+  echo "ERROR: Missing .env in $ROOT (copy .env.example)."
+  exit 1
 fi
+
+# shellcheck disable=SC1091
+set -a; source .env; set +a
 
 : "${SSH_USER:?Set SSH_USER in .env}"
 : "${SSH_IP:?Set SSH_IP in .env}"
@@ -41,15 +47,29 @@ if [[ -z "$SUDO_PASS" ]]; then
 fi
 
 SSH_TARGET="${SSH_USER}@${SSH_IP}"
-SSH_OPTS=( -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new )
+# StrictHostKeyChecking=accept-new is trust-on-first-use (TOFU): the FIRST
+# connection blindly accepts and pins whatever host key the far end presents,
+# so it protects you from key *changes* but not from a MITM on first contact.
+# For anything sensitive, provision a known_hosts file out-of-band and point
+# CAPI_KNOWN_HOSTS at it:
+#   CAPI_KNOWN_HOSTS=~/.ssh/capi_pi_known_hosts scripts/push-pi.sh
+if [[ -n "${CAPI_KNOWN_HOSTS:-}" ]]; then
+  SSH_OPTS=( -o ConnectTimeout=15 -o StrictHostKeyChecking=yes
+             -o UserKnownHostsFile="${CAPI_KNOWN_HOSTS}" )
+else
+  SSH_OPTS=( -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new )
+fi
 
+# All ssh/scp/rsync invocations go through here. When SSH_PASSWORD is set the
+# password is exported as SSHPASS for `sshpass -e`; it is never placed on a
+# command line (unlike `sshpass -p`, which leaks via /proc/<pid>/cmdline).
 ssh_wrap() {
   if [[ -n "${SSH_PASSWORD:-}" ]]; then
     if ! command -v sshpass >/dev/null 2>&1; then
       echo "ERROR: sshpass not found but SSH_PASSWORD is set; install sshpass or use SSH keys."
       exit 1
     fi
-    sshpass -p "$SSH_PASSWORD" "$@"
+    SSHPASS="$SSH_PASSWORD" sshpass -e "$@"
   else
     "$@"
   fi
@@ -125,7 +145,13 @@ if [[ ! -d "${PI_INSTALL_DIR}" ]]; then
   sudo mkdir -p "${PI_INSTALL_DIR}"
 fi
 
-sudo install -o capi -g capi -m 0755 "${REMOTE_TMP}" "${PI_INSTALL_DIR}/capi"
+# Backup + atomic swap so a bad binary can be rolled back manually:
+#   mv ${PI_INSTALL_DIR}/capi.bak ${PI_INSTALL_DIR}/capi && sudo systemctl restart ${PI_SERVICE}
+if [[ -e "${PI_INSTALL_DIR}/capi" ]]; then
+  sudo cp -a "${PI_INSTALL_DIR}/capi" "${PI_INSTALL_DIR}/capi.bak"
+fi
+sudo install -o capi -g capi -m 0755 "${REMOTE_TMP}" "${PI_INSTALL_DIR}/capi.new"
+sudo mv -f "${PI_INSTALL_DIR}/capi.new" "${PI_INSTALL_DIR}/capi"
 rm -f "${REMOTE_TMP}"
 
 sudo systemctl restart "${PI_SERVICE}"

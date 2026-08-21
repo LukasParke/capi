@@ -1,0 +1,53 @@
+{% if ctx.devices.is_empty() %}
+<div class="empty-state">
+  <p><strong>No devices discovered yet</strong> &mdash; scanning&hellip;</p>
+  <p class="dim">Make sure the TV and sources are powered on and connected over HDMI. Discovery can take a minute after boot.</p>
+  <button class="btn btn-primary" type="button" hx-post="/ui/action/deep_scan" hx-swap="none">Run deep scan</button>
+</div>
+{% else %}
+<div class="grid-devices">
+  {% for d in ctx.devices %}
+  <article class="device-card{% if d.is_active_source %} is-active-source{% endif %}{% if d.is_ghost %} is-ghost{% endif %}" data-la="{{ d.logical_address }}">
+    <header class="device-head">
+      <div class="device-title">
+        <h3 class="device-name">{{ d.display_name }}</h3>
+        <p class="device-meta">{{ d.address_name }} &middot; LA {{ d.logical_address }} &middot; <span class="mono">{{ d.physical_address }}</span></p>
+      </div>
+      <div class="power-cell" data-power-cell data-la="{{ d.logical_address }}">
+        {% if d.power_status == "on" %}
+        <span class="badge badge-ok" data-power-badge>On</span>
+        {% else %}{% if d.power_status == "standby" %}
+        <span class="badge badge-warn" data-power-badge>Standby</span>
+        {% else %}
+        <span class="badge badge-dim" data-power-badge>Unknown</span>
+        {% endif %}{% endif %}
+      </div>
+    </header>
+    <div class="chip-row">
+      <span class="chip chip-role">{{ d.role }}</span>
+      {% if d.is_audio_system %}<span class="chip chip-audio">Audio system</span>{% endif %}
+      {% if d.is_own %}<span class="chip chip-own">This adapter</span>{% endif %}
+      {% if d.discovery == "observed" %}<span class="badge badge-ghost" title="Seen in traffic but never polled directly">Ghost</span>{% endif %}
+      {% if d.is_active_source %}<span class="badge badge-accent">Active source</span>{% endif %}
+    </div>
+    <dl class="device-facts">
+      <div><dt>Vendor</dt><dd>{{ d.vendor_name }} <span class="mono dim">{{ d.vendor_id }}</span></dd></div>
+      {% if d.hdmi_port > 0 %}<div><dt>HDMI port</dt><dd>{{ d.hdmi_port }}</dd></div>{% endif %}
+      <div><dt>CEC version</dt><dd>{{ d.cec_version }}</dd></div>
+      <div><dt>Power seen</dt><dd class="dim">{{ d.power_observed_at }}</dd></div>
+      <div><dt>First seen</dt><dd class="dim">{{ d.first_seen }}</dd></div>
+      <div><dt>Last seen</dt><dd class="dim">{{ d.last_seen }}</dd></div>
+    </dl>
+    <footer class="device-actions">
+      <button class="btn btn-small" type="button"
+              hx-post="/ui/action/power_on" hx-vals='{"addr":{{ d.logical_address }}}' hx-swap="none">Power on</button>
+      <button class="btn btn-small" type="button"
+              hx-post="/ui/action/power_off" hx-vals='{"addr":{{ d.logical_address }}}' hx-swap="none">Standby</button>
+      <button class="btn btn-small" type="button"
+              hx-post="/ui/action/set_source" hx-vals='{"addr":{{ d.logical_address }}}' hx-swap="none">Set source</button>
+    </footer>
+  </article>
+  {% endfor %}
+</div>
+{% endif %}
+{% if ctx.message != "" %}<p class="panel-note dim">{{ ctx.message }}</p>{% endif %}

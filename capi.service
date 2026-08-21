@@ -15,7 +15,9 @@ WorkingDirectory=/opt/capi
 
 # Optional: place CAPI_EXTRA_FLAGS=... in /etc/default/capi to add CLI
 # arguments without overriding the unit (e.g. -mqtt-broker tcp://...).
-# Marked with a leading '-' so the unit still starts when the file is absent.
+# The auth token is optional and set the same way: CAPI_EXTRA_FLAGS=-token <secret>
+# (or use the -token flag directly). Marked with a leading '-' so the unit
+# still starts when the file is absent.
 EnvironmentFile=-/etc/default/capi
 
 ExecStart=/opt/capi/capi -bind :8080 -name "CEC HTTP Bridge" $CAPI_EXTRA_FLAGS
@@ -31,12 +33,20 @@ ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
 RestrictSUIDSGID=true
 LockPersonality=true
 RestrictRealtime=true
 MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
 RestrictNamespaces=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+UMask=0077
 
 # Writable paths: /opt/capi for config.json + self-update binary swap.
 # /dev is needed for the CEC adapter; we also explicitly grant access to the

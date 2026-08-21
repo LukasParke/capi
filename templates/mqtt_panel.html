@@ -1,0 +1,29 @@
+<section class="card">
+  <header class="card-head">
+    <h2>MQTT</h2>
+    <span class="conn-pill{% if ctx.connected %} is-ok{% else %} is-err{% endif %}"><span class="dot"></span>{% if ctx.connected %}Connected{% else %}Disconnected{% endif %}</span>
+  </header>
+  <form class="form-grid" data-mqtt-form data-pass-set="{{ ctx.pass_set }}">
+    <label class="field">
+      <span>Broker</span>
+      <input class="input" type="text" name="broker" value="{{ ctx.broker }}" placeholder="tcp://localhost:1883" autocomplete="off" spellcheck="false">
+    </label>
+    <label class="field">
+      <span>Username</span>
+      <input class="input" type="text" name="user" value="{{ ctx.user }}" autocomplete="off" spellcheck="false">
+    </label>
+    <label class="field">
+      <span>Password</span>
+      <input class="input" type="password" name="pass" placeholder="{% if ctx.pass_set %}&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;{% else %}not set{% endif %}" autocomplete="new-password">
+    </label>
+    <label class="field">
+      <span>Topic prefix</span>
+      <input class="input" type="text" name="prefix" value="{{ ctx.prefix }}" autocomplete="off" spellcheck="false">
+    </label>
+    <div class="form-actions">
+      <button class="btn btn-primary" type="submit"
+              hx-post="/ui/action/mqtt_save" hx-include="closest form" hx-swap="none">Save</button>
+      <p class="dim small">Leave the password empty to keep the current one. Saving reconnects the client.</p>
+    </div>
+  </form>
+</section>

@@ -3,8 +3,9 @@
 #
 # .env: SSH_USER, SSH_IP, SSH_PASSWORD (optional), SUDO_PASSWORD (optional; defaults to SSH_PASSWORD)
 # Env overrides:
-#   FOLLOW=1    journalctl -f
-#   LINES=200   -n LINES (ignored when FOLLOW=1)
+#   FOLLOW=1          journalctl -f
+#   LINES=200         -n LINES (ignored when FOLLOW=1)
+#   CAPI_KNOWN_HOSTS  pin the Pi host key out-of-band instead of TOFU accept-new
 #
 set -euo pipefail
 
@@ -32,7 +33,14 @@ fi
 
 PASS_REMOTE=$(printf 'PASS=%q\n' "$SUDO_PASS")
 SSH_TARGET="${SSH_USER}@${SSH_IP}"
-SSH_OPTS=( -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new )
+# accept-new is trust-on-first-use; see .env.example for the CAPI_KNOWN_HOSTS
+# alternative that pins the host key ahead of time.
+if [[ -n "${CAPI_KNOWN_HOSTS:-}" ]]; then
+  SSH_OPTS=( -o ConnectTimeout=30 -o StrictHostKeyChecking=yes
+             -o UserKnownHostsFile="${CAPI_KNOWN_HOSTS}" )
+else
+  SSH_OPTS=( -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new )
+fi
 
 LINES="${LINES:-200}"
 FOLLOW="${FOLLOW:-0}"
@@ -42,27 +50,21 @@ if ! [[ "$LINES" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-sshpass_wrap() {
+# sshpass -e reads the password from SSHPASS so it never lands in argv.
+ssh_wrap() {
   if [[ -n "${SSH_PASSWORD:-}" ]]; then
-    if command -v sshpass &>/dev/null; then
-      sshpass -p "$SSH_PASSWORD" "$@"
-    elif [[ -x /tmp/sshpass-local/bin/sshpass ]]; then
-      /tmp/sshpass-local/bin/sshpass -p "$SSH_PASSWORD" "$@"
-    else
-      echo "ERROR: sshpass not found but SSH_PASSWORD is set."
+    if ! command -v sshpass >/dev/null 2>&1; then
+      echo "ERROR: sshpass not found but SSH_PASSWORD is set; install sshpass or use SSH keys."
       exit 1
     fi
+    SSHPASS="$SSH_PASSWORD" sshpass -e "$@"
   else
     "$@"
   fi
 }
 
 run_ssh() {
-  if [[ -n "${SSH_PASSWORD:-}" ]]; then
-    sshpass_wrap ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "$@"
-  else
-    ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "$@"
-  fi
+  ssh_wrap ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "$@"
 }
 
 echo "==> ${SSH_TARGET}: capi.service logs (FOLLOW=${FOLLOW} LINES=${LINES})"

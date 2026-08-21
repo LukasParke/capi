@@ -1,0 +1,19 @@
+<section class="banner{% if !ctx.cec_ready %} banner-offline{% endif %}" data-banner>
+  {% if !ctx.cec_ready %}
+  <div class="banner-alert" role="alert">
+    <div class="banner-alert-text">
+      <strong>No CEC adapter</strong>
+      <span class="dim">Check that the HDMI/USB adapter is plugged in and the TV has power, then retry.</span>
+    </div>
+    <button class="btn btn-primary btn-small" type="button" hx-post="/ui/action/deep_scan" hx-swap="none">Retry</button>
+  </div>
+  {% endif %}
+  <div class="banner-pills">
+    <span class="pill{% if ctx.cec_ready %} pill-ok{% else %} pill-err{% endif %}"><span class="dot"></span>{% if ctx.cec_ready %}Adapter ready{% else %}Adapter offline{% endif %}</span>
+    <span class="pill{% if ctx.monitoring %} pill-info{% else %} pill-dim{% endif %}"><span class="dot"></span>{% if ctx.monitoring %}Monitoring{% else %}Monitor off{% endif %}</span>
+    {% if ctx.scan_in_progress %}<span class="pill pill-info is-busy"><span class="spinner"></span>Scanning&hellip;</span>{% endif %}
+    {% if ctx.stale %}<span class="pill pill-warn"><span class="dot"></span>Stale data</span>{% endif %}
+    <span class="pill pill-dim"><span class="dot"></span>{{ ctx.device_count }} device{% if ctx.device_count != 1 %}s{% endif %}</span>
+    <span class="banner-scan dim">Last full scan {{ ctx.last_full_scan }}</span>
+  </div>
+</section>

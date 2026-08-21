@@ -1,0 +1,6 @@
+<section class="banner" data-dev-banner>
+  <div class="banner-pills">
+    <span class="pill{% if mode.monitor_only %} pill-warn{% else %} pill-ok{% endif %}"><span class="dot"></span>{% if mode.monitor_only %}Monitor-only mode{% else %}Passive mode{% endif %}</span>
+    <span class="pill{% if adapter_ready %} pill-ok{% else %} pill-err{% endif %}" data-adapter-pill><span class="dot"></span>{% if adapter_ready %}Adapter open{% else %}Adapter closed{% endif %}</span>
+  </div>
+</section>

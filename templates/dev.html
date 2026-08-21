@@ -1,0 +1,175 @@
+{% extends "shell.html" %}
+{% block title %}Dev console{% endblock title %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Dev console</h1>
+    <p class="page-sub">Probes, strategy bench and raw frames. Unstable surface &mdash; expect sharp edges.</p>
+  </div>
+  <div class="quick-controls">
+    <button class="btn btn-ghost" type="button"
+            hx-post="/ui/dev/action/mode" hx-vals='{"mode":"reconnect"}' hx-swap="none">Reconnect</button>
+  </div>
+</div>
+
+<section class="banner" data-dev-banner>
+  <div class="banner-pills">
+    <span class="pill{% if mode.monitor_only %} pill-warn{% else %} pill-ok{% endif %}" data-mode-pill><span class="dot"></span>{% if mode.monitor_only %}Monitor-only mode{% else %}Passive mode{% endif %}</span>
+    <span class="pill{% if adapter_ready %} pill-ok{% else %} pill-err{% endif %}" data-adapter-pill><span class="dot"></span>{% if adapter_ready %}Adapter open{% else %}Adapter closed{% endif %}</span>
+  </div>
+</section>
+
+<div id="dev-result" class="dev-result-slot" aria-live="polite"></div>
+
+<div class="dev-grid">
+  <section class="card" aria-labelledby="probe-heading">
+    <header class="card-head"><h2 id="probe-heading">Probe device</h2></header>
+    <form class="form-row" data-dev-form="probe">
+      <label class="field"><span>Address</span>
+        <input class="input" type="number" name="addr" min="0" max="14" value="0">
+      </label>
+      <label class="field"><span>Kind</span>
+        <select class="select" name="kind">
+          <option value="all" selected>All</option>
+          <option value="power">Power status</option>
+          <option value="vendor">Vendor ID</option>
+          <option value="osd">OSD name</option>
+          <option value="cec_version">CEC version</option>
+          <option value="physical">Physical address</option>
+        </select>
+      </label>
+      <label class="field"><span>Observe (ms)</span>
+        <input class="input" type="number" name="observe_ms" min="100" step="100" value="600">
+      </label>
+      <button class="btn btn-primary" type="submit"
+              hx-post="/ui/dev/action/probe" hx-include="closest form" hx-target="#dev-result" hx-swap="innerHTML">Probe</button>
+    </form>
+  </section>
+
+  <section class="card" aria-labelledby="bench-heading">
+    <header class="card-head"><h2 id="bench-heading">Strategy bench</h2></header>
+    <form class="form-row" data-dev-form="run_strategies">
+      <label class="field"><span>Action</span>
+        <select class="select" name="action">
+          {% for a in actions %}
+          <option value="{{ a }}">{{ a }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="field"><span>Target LA</span>
+        <input class="input" type="number" name="target" min="0" max="14" placeholder="auto">
+      </label>
+      <label class="field"><span>Observe (ms)</span>
+        <input class="input" type="number" name="observe_ms" min="0" step="100" value="1000">
+      </label>
+      <label class="check"><input type="checkbox" name="all_strategies" value="1"> <span>All strategies</span></label>
+      <button class="btn btn-primary" type="submit"
+              hx-post="/ui/dev/action/run_strategies" hx-include="closest form" hx-target="#dev-result" hx-swap="innerHTML">Run</button>
+    </form>
+    <details class="sub-form">
+      <summary>Save strategy override for a vendor</summary>
+      <form class="form-row" data-dev-form="save_strategy">
+        <label class="field"><span>Vendor ID</span>
+          <input class="input mono" type="text" name="vendor" placeholder="0x0011a2" spellcheck="false">
+        </label>
+        <label class="field"><span>Action</span>
+          <select class="select" name="action">
+            {% for a in actions %}
+            <option value="{{ a }}">{{ a }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="field"><span>Strategy</span>
+          <input class="input mono" type="text" name="strategy" list="strategy-names" placeholder="sam_nudge" spellcheck="false">
+        </label>
+        <datalist id="strategy-names"></datalist>
+        <button class="btn" type="submit"
+                hx-post="/ui/dev/action/save_strategy" hx-include="closest form" hx-target="#dev-result" hx-swap="innerHTML">Save</button>
+      </form>
+    </details>
+  </section>
+
+  <section class="card" aria-labelledby="sendkey-heading">
+    <header class="card-head"><h2 id="sendkey-heading">Send key</h2></header>
+    <form class="form-row" data-dev-form="send_key">
+      <label class="field"><span>Address</span>
+        <input class="input" type="number" name="addr" min="0" max="14" value="0">
+      </label>
+      <label class="field"><span>Key</span>
+        <select class="select" name="key">
+          {% for k in keys %}
+          <option value="{{ k.0 }}">{{ k.0 }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="field"><span>Hold (ms)</span>
+        <input class="input" type="number" name="hold_ms" min="0" step="50" value="0">
+      </label>
+      <label class="field"><span>Repeat</span>
+        <input class="input" type="number" name="repeat" min="0" value="0">
+      </label>
+      <button class="btn btn-primary" type="submit"
+              hx-post="/ui/dev/action/send_key" hx-include="closest form" hx-target="#dev-result" hx-swap="innerHTML">Send</button>
+    </form>
+  </section>
+
+  <section class="card" aria-labelledby="opcode-heading">
+    <header class="card-head"><h2 id="opcode-heading">Raw opcode</h2></header>
+    <form class="form-row" data-dev-form="send_opcode">
+      <label class="field"><span>Destination</span>
+        <input class="input" type="number" name="dest" min="0" max="15" value="0">
+      </label>
+      <label class="field"><span>Opcode</span>
+        <input class="input mono" type="text" name="opcode" placeholder="0x46" list="opcode-names" spellcheck="false" required>
+      </label>
+      <label class="field"><span>Params (hex bytes)</span>
+        <input class="input mono" type="text" name="params_hex" placeholder="0x10 0x02" spellcheck="false">
+      </label>
+      <datalist id="opcode-names"></datalist>
+      <button class="btn btn-primary" type="submit"
+              hx-post="/ui/dev/action/send_opcode" hx-include="closest form" hx-target="#dev-result" hx-swap="innerHTML">Send</button>
+    </form>
+  </section>
+</div>
+
+<section class="card" aria-labelledby="trace-heading">
+  <header class="card-head">
+    <h2 id="trace-heading">Frame trace</h2>
+    <span class="pill pill-dim"><span class="dot"></span>polling every 2s</span>
+  </header>
+  <div class="table-scroll">
+    <table class="table trace-table">
+      <thead>
+        <tr><th>Time</th><th>From</th><th>To</th><th>Opcode</th><th>Ack</th><th>Params</th></tr>
+      </thead>
+      <tbody id="trace-body"
+             hx-get="/ui/dev/fragment/trace" hx-trigger="every 2s" hx-swap="innerHTML">
+        <tr class="trace-empty"><td colspan="6">Waiting for frames&hellip;</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card" aria-labelledby="eventtrace-heading">
+  <header class="card-head">
+    <h2 id="eventtrace-heading">Event trace</h2>
+  </header>
+  <div id="dev-feed" class="feed feed-compact" role="log" aria-live="polite">
+    <p class="feed-empty" data-feed-empty>Waiting for events&hellip;</p>
+  </div>
+</section>
+
+<section class="card" aria-labelledby="shortcuts-heading">
+  <header class="card-head"><h2 id="shortcuts-heading">Keyboard shortcuts</h2></header>
+  <div class="shortcut-grid">
+    <span class="keys"><kbd>&uarr;</kbd><kbd>&darr;</kbd><kbd>&larr;</kbd><kbd>&rarr;</kbd></span><span class="dim">Navigate</span>
+    <span class="keys"><kbd>Enter</kbd></span><span class="dim">Select</span>
+    <span class="keys"><kbd>Esc</kbd> <kbd>Backspace</kbd></span><span class="dim">Back</span>
+    <span class="keys"><kbd>+</kbd> <kbd>&minus;</kbd></span><span class="dim">Volume up / down</span>
+    <span class="keys"><kbd>m</kbd></span><span class="dim">Mute</span>
+    <span class="keys"><kbd>h</kbd></span><span class="dim">Home</span>
+    <span class="keys"><kbd>0</kbd>&ndash;<kbd>9</kbd></span><span class="dim">Number keys</span>
+  </div>
+  <p class="dim small">Shortcuts are ignored while you are typing in a field.</p>
+</section>
+{% endblock content %}

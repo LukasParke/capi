@@ -1,22 +1,21 @@
+
 # Build output
-/capi-server
-/dist/
-*.o
-*.a
-*.so
-
-# Platform library (p8-platform); optional, see QUICKSTART.md
-/platform/
-
 # Go
-*.exe
-*.test
-*.out
-vendor/
-
 # IDE and OS
-.idea/
-.vscode/
+# Platform library (p8-platform); optional, see QUICKSTART.md
+*.a
+*.exe
+*.o
+*.out
+*.so
 *.swp
+*.test
 .DS_Store
 .env
+.idea/
+.vscode/
+/capi-server
+/dist/
+/platform/
+target/
+vendor/

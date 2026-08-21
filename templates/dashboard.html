@@ -1,0 +1,72 @@
+{% extends "shell.html" %}
+{% block title %}Dashboard{% endblock title %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Dashboard</h1>
+    <p class="page-sub">Live view of the CEC bus, devices and remote controls.</p>
+  </div>
+  <div class="quick-controls" role="group" aria-label="Quick controls">
+    <button class="btn btn-primary" type="button" hx-post="/ui/action/power_on" hx-swap="none">Power on</button>
+    <button class="btn" type="button" hx-post="/ui/action/power_off" hx-swap="none">Standby</button>
+    <button class="btn btn-ghost" type="button" hx-post="/ui/action/deep_scan" hx-swap="none">Deep scan</button>
+  </div>
+</div>
+
+<div id="bus-banner" class="panel-slot panel-slot-banner" aria-busy="true"
+     hx-get="/ui/fragment/bus_banner" hx-trigger="load, refresh-banner from:body" hx-swap="innerHTML">
+  <div class="skeleton skeleton-line w-60"></div>
+</div>
+
+<div class="dash-grid">
+  <div id="devices-panel" class="panel-slot area-devices" aria-busy="true"
+       hx-get="/ui/fragment/devices" hx-trigger="load, refresh-devices from:body" hx-swap="innerHTML">
+    <div class="skeleton skeleton-card"></div>
+  </div>
+
+  <div id="source-panel" class="panel-slot area-source" aria-busy="true"
+       hx-get="/ui/fragment/source_panel" hx-trigger="load, refresh-source from:body" hx-swap="innerHTML">
+    <div class="skeleton skeleton-line w-80"></div>
+  </div>
+
+  <div id="volume-panel" class="panel-slot area-volume" aria-busy="true"
+       hx-get="/ui/fragment/volume_panel" hx-trigger="load, refresh-volume from:body" hx-swap="innerHTML">
+    <div class="skeleton skeleton-line w-80"></div>
+  </div>
+
+  <div id="nav-panel" class="panel-slot area-nav" aria-busy="true"
+       hx-get="/ui/fragment/nav_panel" hx-trigger="load" hx-swap="innerHTML">
+    <div class="skeleton skeleton-card"></div>
+  </div>
+
+  <div id="topology-panel" class="panel-slot area-topology" aria-busy="true"
+       hx-get="/ui/fragment/topology_hdmi" hx-trigger="load, refresh-topology from:body" hx-swap="innerHTML">
+    <div class="skeleton skeleton-line w-60"></div>
+  </div>
+
+  <div id="health-panel" class="panel-slot area-health" aria-busy="true"
+       hx-get="/ui/fragment/health" hx-trigger="load, every 30s" hx-swap="innerHTML">
+    <div class="skeleton skeleton-line w-60"></div>
+  </div>
+
+  <section class="card area-activity" aria-label="Activity feed">
+    <header class="card-head">
+      <h2>Activity</h2>
+      <span class="conn-pill" data-conn-state><span class="dot"></span><span data-conn-label>connecting</span></span>
+    </header>
+    <div id="activity-feed" class="feed" role="log" aria-live="polite">
+      <p class="feed-empty" data-feed-empty>Waiting for bus events&hellip;</p>
+    </div>
+  </section>
+
+  <section class="card area-logs" aria-label="Service log">
+    <header class="card-head">
+      <h2>Service log</h2>
+    </header>
+    <div id="logs-panel" class="panel-slot panel-slot-flush" aria-busy="true"
+         hx-get="/ui/fragment/logs" hx-trigger="load, every 10s" hx-swap="innerHTML">
+      <div class="skeleton skeleton-line w-80"></div>
+    </div>
+  </section>
+</div>
+{% endblock content %}

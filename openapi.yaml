@@ -2,23 +2,41 @@ openapi: 3.0.3
 info:
   title: CEC HTTP Bridge API
   description: |
-    REST API for controlling HDMI-CEC devices. Use this API to power on/off
-    TVs and devices, control volume, switch inputs (HDMI ports), send remote
-    key presses, send raw CEC commands, and manage MQTT settings. Intended
-    for home automation, media centers, and scripting.
-  version: 1.2.0
+    REST API for controlling HDMI-CEC devices (Rust implementation). Power,
+    volume, source/HDMI switching, remote keys, raw CEC commands, MQTT
+    settings, a dev console surface, and real-time events (SSE + WebSocket).
+    Intended for home automation, media centers, and scripting.
+
+    ## Envelope
+    Every JSON response uses the envelope
+    `{"status":"success"|"error","message":"...","data":...}`.
+    `message` and `data` are omitted when empty/absent. Long-running
+    operations return `success` with `data.accepted=true` (HTTP 202).
+
+    ## Authentication
+    Auth is **optional** and active only when the server was started with a
+    token (`-token <secret>` / `auth_token` in `config.json`). When active,
+    every `/api` route **except `GET /api/health`** (and `GET /metrics`)
+    requires the token via `Authorization: Bearer <token>`,
+    `X-Auth-Token: <token>`, `?key=<token>`, or the `capi_token` cookie set by
+    the UI login page. Mutating cookie-authenticated requests additionally
+    require same-origin. When no token is configured, no auth is required.
+  version: 2.0.0
   license:
     name: MIT
     url: https://opensource.org/licenses/MIT
 
 servers:
-  - url: http://localhost:8080/api
+  - url: http://localhost:8080
     description: Local (default)
-  - url: http://{host}:8080/api
+  - url: http://{host}:8080
     description: Network
     variables:
       host:
         default: localhost
+
+security:
+  - BearerAuth: []
 
 tags:
   - name: Devices
@@ -34,25 +52,32 @@ tags:
   - name: Raw
     description: Raw CEC commands
   - name: System
-    description: Topology, audio status, logs, health, events, bus steward state, and updates
+    description: Topology, audio status, logs, health, metrics, events, and updates
   - name: Bus
     description: Cached CEC bus snapshot, deep scans, and optional frame capture
   - name: Settings
-    description: MQTT and service configuration
+    description: MQTT configuration
+  - name: Dev
+    description: Low-level dev console (probes, raw sends, strategies)
+  - name: Web UI
+    description: Dashboard pages, HTMX fragments, and UI actions (HTML, not JSON)
 
 paths:
-  /devices:
+  # ────────────────────────────────── Devices ─────────────────────────────
+  /api/devices:
     get:
       tags: [Devices]
       summary: List CEC devices
       description: |
-        Returns devices from the **bus steward** cache when neither `live` nor `rescan`
-        is set and a recent scan is available (fast). With an empty cache and no query
-        flags, the server runs a **light** reconcile (no `RescanDevices`, still polls
-        addresses and `GetDeviceInfo`). Use `rescan=1` or `live=1` for a **full**
-        reconcile including `RescanDevices`. Scans can take tens of seconds on slow
-        buses; the server may respond with **504** after about 50s. Use `GET /api/bus/state`
-        for `stale`, `last_full_scan_at`, and `scan_in_progress`.
+        Returns devices from the **bus steward cache** by default (immediate,
+        no bus I/O). `?wait=N` (seconds, capped at 10) blocks up to N seconds
+        for a fresh scan to land before serving the cache. `?live=1` /
+        `?rescan=1` force a full bus reconcile before returning (may take
+        tens of seconds on slow buses; the server responds 504 after ~50s).
+        Each entry carries a `discovery` provenance (`active` = enumerated by
+        libCEC, `polled` = confirmed by POLL probe, `observed` = ghost seen in
+        passive bus traffic) plus `polled_at` / `first_seen_at` /
+        `last_seen_at` timestamps and passive `observed_*` fields.
       operationId: getDevices
       parameters:
         - name: live
@@ -64,11 +89,20 @@ paths:
             enum: ['1', 'true']
         - name: rescan
           in: query
-          description: Force a full bus reconcile before returning (1 or true)
+          description: Force a full bus reconcile before returning
           required: false
           schema:
             type: string
             enum: ['1', 'true', 'false']
+        - name: wait
+          in: query
+          description: >
+            Max seconds to wait for a fresher scan before serving the cache.
+            Values above 10 are clamped to 10. Default: immediate cache.
+          required: false
+          schema:
+            type: number
+            maximum: 10
       responses:
         '200':
           description: Devices retrieved
@@ -93,6 +127,12 @@ paths:
                     menu_language: eng
                     is_active: true
                     is_active_source: false
+                    discovery: active
+                    polled_at: "2026-08-21T10:00:00.123456Z"
+                    first_seen_at: "2026-08-21T09:31:02.000000Z"
+                    last_seen_at: "2026-08-21T10:00:00.123456Z"
+                    observed_power_status: "on"
+                    observed_at: "2026-08-21T09:59:58.000000Z"
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -100,68 +140,7 @@ paths:
         '504':
           description: Scan timed out (server limit ~50s; allow longer client timeouts)
 
-  /bus/state:
-    get:
-      tags: [Bus]
-      summary: Bus steward snapshot
-      description: |
-        Cached CEC bus state including `devices` (same shape as `GET /api/devices`),
-        `active_source`, `logical_addresses`, `stale`, `scan_in_progress`, and optional
-        `recent_frames` when `bus.frame_ring_size` is set in `config.json` (captures
-        decoded frames from `OnCommand`; can be CPU-heavy combined with `monitor: true`
-        or `-cec-monitor`).
-      operationId: getBusState
-      responses:
-        '200':
-          description: Bus state
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-        '500':
-          $ref: '#/components/responses/InternalError'
-
-  /bus/scan:
-    post:
-      tags: [Bus]
-      summary: Queue deep bus scan
-      description: |
-        Accepts immediately (HTTP 202) and runs an extended reconcile: RescanDevices,
-        extra settle (`bus.deep_settle_ms`), full enumeration, optional **Give*** probe
-        transmits per device, then a broadcast Give Physical Address. Poll
-        `GET /api/bus/state` until `scan_in_progress` is false. Vendor-specific skips:
-        `bus.vendor_profiles` in `config.json`.
-      operationId: postBusScan
-      responses:
-        '202':
-          description: Deep scan queued
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-        '503':
-          description: Steward queue full
-        '500':
-          $ref: '#/components/responses/InternalError'
-
-  /bus/frames:
-    get:
-      tags: [Bus]
-      summary: Recent captured CEC frames
-      description: |
-        Returns entries from the ring buffer populated when `bus.frame_ring_size` > 0
-        (each `OnCommand` callback appends a row). Independent of libCEC monitoring
-        verbosity; use together with `bus.monitor` or `-cec-monitor` to see traffic.
-      operationId: getBusFrames
-      responses:
-        '200':
-          description: Frame list (may be empty)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-
-  /devices/{address}:
+  /api/devices/{address}:
     get:
       tags: [Devices]
       summary: Get device by logical address
@@ -181,7 +160,92 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /power/on:
+  # ────────────────────────────────── Bus ─────────────────────────────────
+  /api/bus/state:
+    get:
+      tags: [Bus]
+      summary: Bus steward snapshot
+      description: |
+        Cached CEC bus state including `devices` (same shape as
+        `GET /api/devices`), `active_source`, `logical_addresses`, `stale`,
+        `last_full_scan_at`, `scan_in_progress`, and optional `recent_frames`
+        when `bus.frame_ring_size` is set in `config.json`. Served from the
+        cached snapshot; topology refreshes happen asynchronously.
+      operationId: getBusState
+      responses:
+        '200':
+          description: Bus state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bus/scan:
+    post:
+      tags: [Bus]
+      summary: Queue deep bus scan
+      description: |
+        Accepts immediately (HTTP 202) and runs an extended reconcile in the
+        background: full device rescan, extra settle (`bus.deep_settle_ms`),
+        full enumeration, optional Give* probe transmits per device, then a
+        broadcast Give Physical Address. Poll `GET /api/bus/state` until
+        `scan_in_progress` is false. Vendor-specific skips via
+        `bus.vendor_profiles` in `config.json`.
+      operationId: postBusScan
+      responses:
+        '202':
+          description: Deep scan queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '503':
+          description: Steward queue full
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bus/frames:
+    get:
+      tags: [Bus]
+      summary: Recent captured CEC frames
+      description: |
+        Returns entries from the ring buffer populated when
+        `bus.frame_ring_size` > 0 (each OnCommand callback appends a row).
+        Entries carry monotonic `seq` numbers; frame diffs are computed by
+        sequence, never by ring index.
+      operationId: getBusFrames
+      responses:
+        '200':
+          description: Frame list (may be empty)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+
+  # ────────────────────────────────── Topology ────────────────────────────
+  /api/topology:
+    get:
+      tags: [System]
+      summary: CEC bus topology
+      description: >
+        Own logical addresses, active ports, and devices per port. Served from
+        the cached steward snapshot (refresh is async); never blocks on the
+        CEC connection.
+      operationId: getTopology
+      responses:
+        '200':
+          description: Topology retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ────────────────────────────────── Power ───────────────────────────────
+  /api/power/on:
     post:
       tags: [Power]
       summary: Power on TV
@@ -197,7 +261,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /power/on/{address}:
+  /api/power/on/{address}:
     post:
       tags: [Power]
       summary: Power on device
@@ -217,7 +281,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /power/off:
+  /api/power/off:
     post:
       tags: [Power]
       summary: Power off TV
@@ -233,7 +297,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /power/off/{address}:
+  /api/power/off/{address}:
     post:
       tags: [Power]
       summary: Power off device
@@ -253,7 +317,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /power/status:
+  /api/power/status:
     get:
       tags: [Power]
       summary: Get TV power status
@@ -275,7 +339,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /power/status/{address}:
+  /api/power/status/{address}:
     get:
       tags: [Power]
       summary: Get device power status
@@ -295,37 +359,37 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /volume/up:
+  # ────────────────────────────────── Volume ──────────────────────────────
+  /api/volume/up:
     post:
       tags: [Volume]
       summary: Volume up
-      description: |
-        Without `{address}`: enables **Set System Audio Mode ON** toward the TV, then
-        sends **User Control** volume up to logical addresses **5** (audio), **0** (TV),
-        then playback roles, then falls back to **libcec** volume. With `{address}`:
-        volume key only to that device.
+      description: >
+        Volume up via libcec (targets the TV's system audio path). Use the
+        addressed variant to target another device (e.g. 5 = audio system).
       operationId: volumeUp
       responses:
         '200':
-          description: Volume up command sent
+          description: Volume up sent
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /volume/up/{address}:
+  /api/volume/up/{address}:
     post:
       tags: [Volume]
       summary: Volume up to specific device
-      description: Send volume up key press to a specific device by logical address.
       operationId: volumeUpAddress
       parameters:
         - $ref: '#/components/parameters/LogicalAddress'
       responses:
         '200':
-          description: Volume up sent to device
+          description: Volume up sent
           content:
             application/json:
               schema:
@@ -335,33 +399,33 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /volume/down:
+  /api/volume/down:
     post:
       tags: [Volume]
       summary: Volume down
-      description: Same strategy as `POST /volume/up` (SAM nudge, then keys, then libcec).
       operationId: volumeDown
       responses:
         '200':
-          description: Volume down command sent
+          description: Volume down sent
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /volume/down/{address}:
+  /api/volume/down/{address}:
     post:
       tags: [Volume]
       summary: Volume down to specific device
-      description: Send volume down key press to a specific device by logical address.
       operationId: volumeDownAddress
       parameters:
         - $ref: '#/components/parameters/LogicalAddress'
       responses:
         '200':
-          description: Volume down sent to device
+          description: Volume down sent
           content:
             application/json:
               schema:
@@ -371,33 +435,33 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /volume/mute:
+  /api/volume/mute:
     post:
       tags: [Volume]
       summary: Toggle mute
-      description: Same pass-through order as volume, then **libcec** mute toggle.
       operationId: volumeMute
       responses:
         '200':
-          description: Mute toggle command sent
+          description: Mute toggle sent
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /volume/mute/{address}:
+  /api/volume/mute/{address}:
     post:
       tags: [Volume]
       summary: Toggle mute on specific device
-      description: Send mute key press to a specific device by logical address.
       operationId: volumeMuteAddress
       parameters:
         - $ref: '#/components/parameters/LogicalAddress'
       responses:
         '200':
-          description: Mute sent to device
+          description: Mute toggle sent
           content:
             application/json:
               schema:
@@ -407,12 +471,12 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /source/active:
+  # ────────────────────────────── Source / HDMI ───────────────────────────
+  /api/source/active:
     get:
       tags: [Source]
-      summary: Get active source
-      description: Get the currently active source (device that is displaying).
-      operationId: getActiveSource
+      summary: Get current active source
+      operationId: getSourceActive
       responses:
         '200':
           description: Active source retrieved
@@ -420,28 +484,19 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: success
-                message: Active source retrieved
-                data:
-                  address: 4
-                  name: Playback Device 1
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /source/{address}:
+  /api/source/{address}:
     post:
       tags: [Source]
-      summary: Switch to device
-      description: |
-        Switch to a specific device by logical address. Powers on the device
-        if in standby and sends Set Stream Path.
-      operationId: setActiveSource
+      summary: Switch to device by logical address
+      operationId: postSourceAddress
       parameters:
         - $ref: '#/components/parameters/LogicalAddress'
       responses:
         '200':
-          description: Switched to device
+          description: Source switch sent
           content:
             application/json:
               schema:
@@ -451,24 +506,23 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /hdmi/{port}:
+  /api/hdmi/{port}:
     post:
       tags: [Source]
-      summary: Switch to HDMI port
-      description: Switch TV input to a specific HDMI port (1-15).
-      operationId: setHDMIPort
+      summary: Switch TV to HDMI port
+      description: Switch the TV to HDMI port (1-15).
+      operationId: postHdmiPort
       parameters:
         - name: port
           in: path
           required: true
-          description: HDMI port number (1-15)
           schema:
             type: integer
             minimum: 1
             maximum: 15
       responses:
         '200':
-          description: Switched to HDMI port
+          description: HDMI switch sent
           content:
             application/json:
               schema:
@@ -478,110 +532,12 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /key:
-    post:
-      tags: [Navigation]
-      summary: Send key press
-      description: |
-        Send a key press (press and release) to a device. Provide either
-        `key` (name) or `keycode` (0-255). For keycode 0 (Select), use
-        `"key": "select"`.
-      operationId: sendKey
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/KeyRequest'
-            examples:
-              byKey:
-                summary: By key name
-                value:
-                  address: 4
-                  key: up
-              byKeycode:
-                summary: By keycode
-                value:
-                  address: 4
-                  keycode: 0
-      responses:
-        '200':
-          description: Key command sent
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '500':
-          $ref: '#/components/responses/InternalError'
-
-  /command:
-    post:
-      tags: [Raw]
-      summary: Send raw CEC command
-      description: |
-        Send a raw CEC command. Initiator and destination are logical
-        addresses (0-15). Opcode is 0-255. Parameters are optional; max 14 bytes.
-      operationId: sendCommand
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CommandRequest'
-            example:
-              initiator: 1
-              destination: 0
-              opcode: 143
-              parameters: []
-      responses:
-        '200':
-          description: Raw command sent
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '500':
-          $ref: '#/components/responses/InternalError'
-
-  /topology:
+  # ────────────────────────────────── Audio ───────────────────────────────
+  /api/audio/status:
     get:
       tags: [System]
-      summary: Get CEC bus topology
-      description: |
-        Get the CEC bus topology including own logical addresses, own HDMI port,
-        known port count, and active ports with their connected devices.
-      operationId: getTopology
-      responses:
-        '200':
-          description: Bus topology retrieved
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: success
-                message: Bus topology retrieved
-                data:
-                  own_addresses: [1]
-                  own_port: 1
-                  known_port_count: 3
-                  active_ports:
-                    - port: 1
-                      devices: ["CEC Bridge"]
-                    - port: 2
-                      devices: ["Fire TV"]
-        '500':
-          $ref: '#/components/responses/InternalError'
-
-  /audio/status:
-    get:
-      tags: [System]
-      summary: Get audio status
-      description: Get the current volume level and mute state from the audio system.
+      summary: Audio status
+      description: Volume level and mute state from the system audio device.
       operationId: getAudioStatus
       responses:
         '200':
@@ -590,158 +546,189 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: success
-                message: Audio status retrieved
-                data:
-                  volume: 45
-                  muted: false
-                  volume_raw: 45
-                  raw_status: 69
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /logs:
-    get:
-      tags: [System]
-      summary: Get recent logs
+  # ───────────────────────────── Navigation / Raw ─────────────────────────
+  /api/key:
+    post:
+      tags: [Navigation]
+      summary: Send key press
       description: |
-        Recent log lines from libCEC (traffic, notices, errors) plus application-level entries (level `APP`)
-        from HTTP/MQTT actions. Ring buffer holds up to 500 entries; newest last in the JSON array.
-      operationId: getLogs
+        Send a remote key press by name (preferred) or raw keycode.
+        **Keycode 0 is rejected** with an explicit error — keycode 0 is the
+        Select code and must be sent as `{"key": "select"}` to avoid
+        accidental selects from unset/zero-valued fields.
+      operationId: postKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KeyRequest'
       responses:
         '200':
-          description: Logs retrieved
+          description: Key press sent
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: success
-                message: Logs retrieved
-                data:
-                  - level: APP
-                    timestamp: "2026-02-12T10:30:45Z"
-                    message: "[http] listening on :8080 version=v1.0.0"
-                  - level: NOTICE
-                    timestamp: "2026-02-12T10:30:46Z"
-                    message: CEC connection opened
+        '400':
+          description: Invalid address, unknown key name, or keycode 0 (use key:"select")
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /events:
+  /api/command:
+    post:
+      tags: [Raw]
+      summary: Send raw CEC command
+      operationId: postCommand
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandRequest'
+      responses:
+        '200':
+          description: Command sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ────────────────────────────── System routes ───────────────────────────
+  /api/logs:
+    get:
+      tags: [System]
+      summary: Recent CEC log messages
+      operationId: getLogs
+      responses:
+        '200':
+          description: Log buffer retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/events:
     get:
       tags: [System]
       summary: Server-Sent Events stream
       description: |
-        Real-time stream of CEC bus events using Server-Sent Events (SSE).
-        Events are JSON objects with `type`, `timestamp`, and `data` fields.
-        Event types: `power_change`, `source_activated`, `key_press`, `command`, `alert`,
-        `devices_changed` (after a debounced bus rescan; payload includes `logical_addresses`),
-        `configuration_changed` (libCEC client config), `adapter_state` (`connected` / `disconnected`).
-        Sends a keepalive comment every 15 seconds.
-      operationId: getEvents
+        Live event stream. `Content-Type: text/event-stream`. Each event's
+        `data:` line is a JSON `EventMessage`. Types: `power_change`,
+        `source_activated`, `key_press`, `command`, `alert`,
+        `devices_changed`, `configuration_changed`, `adapter_state`.
+      operationId: getEventsSse
       responses:
         '200':
-          description: SSE event stream
+          description: SSE stream established
           content:
             text/event-stream:
               schema:
-                type: string
-              example: |
-                data: {"type":"power_change","timestamp":"2026-02-12T10:30:45Z","data":{"address":0,"status":"on"}}
-                data: {"type":"devices_changed","timestamp":"2026-02-12T10:31:02Z","data":{"reason":"bus_topology","logical_addresses":[0,1,4]}}
-        '500':
-          $ref: '#/components/responses/InternalError'
+                $ref: '#/components/schemas/EventMessage'
 
-  /events/ws:
+  /api/events/ws:
     get:
       tags: [System]
-      summary: WebSocket stream for the embedded HTMX UI
+      summary: WebSocket event stream
       description: |
-        Upgrades to a WebSocket (`ws://` or `wss://` matching the page origin).
-        Text frames are **HTML** fragments with `hx-swap-oob` targets used by htmx 1.x
-        `hx-ws` (live event log, bus banner, and selective panel refreshes).
-        For JSON event payloads and scripts, use `GET /events` (Server-Sent Events) instead.
-      operationId: getEventsWebSocket
+        WebSocket upgrade at `/api/events/ws`; server pushes the same JSON
+        `EventMessage` payloads as the SSE stream.
+      operationId: getEventsWs
+      schemes: [ws, wss]
       responses:
         '101':
-          description: Switching Protocols — WebSocket per RFC 6455 (response not JSON)
-        '400':
-          description: Bad upgrade request
-        '500':
-          $ref: '#/components/responses/InternalError'
+          description: Switching Protocols (WebSocket upgrade)
 
-  /health:
+  /api/health:
     get:
       tags: [System]
       summary: Health check
-      description: Service health, version, and libcec version information.
+      description: |
+        Liveness/version probe. **Never requires authentication**, even when
+        a token is configured. Returns version and libcec info.
       operationId: getHealth
+      security: []
       responses:
         '200':
-          description: Service is healthy
+          description: Service healthy
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
               example:
                 status: success
-                message: Service is healthy
                 data:
-                  version: v20260212.143000-abc1234
-                  libcec: "libCEC version 6.0.2"
+                  version: v2.0.0
+                  libcec: "libcec 6.0.2"
 
-  /update:
+  /metrics:
+    get:
+      tags: [System]
+      summary: Prometheus metrics
+      description: |
+        Prometheus text exposition format (`text/plain; version=0.0.4`).
+        **Never requires authentication**, even when a token is configured.
+      operationId: getMetrics
+      security: []
+      responses:
+        '200':
+          description: Metrics in Prometheus text format
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                # HELP capi_devices_known Number of known CEC devices
+                # TYPE capi_devices_known gauge
+                capi_devices_known 4
+
+  /api/update:
     post:
       tags: [System]
       summary: Trigger self-update
       description: |
-        Check for a new release on GitHub and install it. Downloads the new
-        binary and web UI, then restarts the systemd service. Returns the
-        old and new version on success. If already up to date, returns the
-        current version.
-      operationId: triggerUpdate
+        Downloads the latest release, verifies SHA256SUMS, swaps the binary
+        (keeping `capi.bak` for rollback), and restarts the service. Never
+        downgrades: the remote version must compare greater than the running
+        semver. Returns `accepted=true` while the update runs in the
+        background; progress lands in `/api/logs` and the SSE stream.
+      operationId: postUpdate
       responses:
         '200':
-          description: Update check completed
+          description: Update accepted or already up to date
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
-              examples:
-                updated:
-                  summary: Update installed
-                  value:
-                    status: success
-                    message: "Updated to v20260212.150000-def5678, restarting..."
-                    data:
-                      old_version: v20260212.143000-abc1234
-                      new_version: v20260212.150000-def5678
-                upToDate:
-                  summary: Already up to date
-                  value:
-                    status: success
-                    message: Already up to date
-                    data:
-                      version: v20260212.143000-abc1234
+              example:
+                status: success
+                message: update started
+                data:
+                  accepted: true
+        '409':
+          description: Update already in progress (single-flight)
         '500':
           $ref: '#/components/responses/InternalError'
-        '502':
-          description: GitHub API unreachable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
 
-  /settings/mqtt:
+  # ─────────────────────────────── Settings ───────────────────────────────
+  /api/settings/mqtt:
     get:
       tags: [Settings]
-      summary: Get MQTT settings
-      description: |
-        Get the current MQTT broker configuration and connection status.
-        The password is masked as `"***"` if set, or `""` if empty.
-      operationId: getMQTTSettings
+      summary: Get MQTT configuration and connection status
+      operationId: getMqttSettings
       responses:
         '200':
           description: MQTT settings retrieved
@@ -749,78 +736,507 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: success
-                message: MQTT settings
-                data:
-                  broker: "tcp://localhost:1883"
-                  user: ha
-                  pass: "***"
-                  prefix: capi
-                  connected: true
+        '500':
+          $ref: '#/components/responses/InternalError'
     post:
       tags: [Settings]
       summary: Update MQTT settings
       description: |
-        Update the MQTT broker configuration. Settings are persisted to
-        `config.json` next to the binary. If a broker URL is provided, the
-        service connects (or reconnects) to the broker. If the broker is
-        empty, MQTT is disabled and disconnected.
-
-        To keep the existing password without changing it, send `"***"` as
-        the password value.
-      operationId: postMQTTSettings
+        Persisted to `config.json`. The in-memory config only advances after
+        the disk write succeeds (atomic update-and-persist under one lock).
+      operationId: postMqttSettings
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/MQTTSettingsRequest'
-            example:
-              broker: "tcp://localhost:1883"
-              user: ha
-              pass: secret
-              prefix: capi
       responses:
         '200':
-          description: MQTT settings saved
+          description: MQTT settings updated
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiResponse'
-              example:
-                status: success
-                message: MQTT settings saved
         '400':
           $ref: '#/components/responses/BadRequest'
         '500':
           $ref: '#/components/responses/InternalError'
 
+  # ───────────────────────────────── Dev routes ───────────────────────────
+  /api/dev/mode:
+    get:
+      tags: [Dev]
+      summary: Current CEC mode
+      description: >
+        Returns `mode` ("passive" | "monitor_only"), `live_mode`,
+        `activate_source`, and `adapter_connected`.
+      operationId: getDevMode
+      responses:
+        '200':
+          description: CEC mode
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [Dev]
+      summary: Set CEC mode
+      description: >
+        Body `{"mode": "passive" | "monitor_only"}`. Persists to config.json
+        and signals the supervisor to reconnect so the mode takes effect.
+      operationId: postDevMode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode:
+                  type: string
+                  enum: [passive, monitor_only]
+      responses:
+        '200':
+          description: Mode updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/dev/probe:
+    post:
+      tags: [Dev]
+      summary: Run Give* probes against a logical address
+      description: |
+        Runs the selected probes sequentially, each with its own observation
+        window (default 600ms; tunable via `observe_ms`, hard-capped at
+        5000ms) so replies are attributed to the probe that elicited them.
+        `kind`: power | osd | vendor | cec_version | physical | audio | sam |
+        menu | all. Rejected with 409 while the adapter is monitor-only.
+      operationId: postDevProbe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address, kind]
+              properties:
+                address:
+                  type: integer
+                  minimum: 0
+                  maximum: 15
+                kind:
+                  type: string
+                  enum: [power, osd, vendor, cec_version, physical, audio, sam, menu, all]
+                observe_ms:
+                  type: integer
+                  description: Per-probe observation window (default 600, clamped to <= 5000)
+      responses:
+        '200':
+          description: Probe results (per-step replies)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Adapter is in monitor-only mode
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/dev/send_key:
+    post:
+      tags: [Dev]
+      summary: Low-level key send (always blind)
+      description: |
+        Transmits press/release even if the destination is not in the active
+        mask. `hold_ms` clamped to <= 2000, `repeat` clamped to <= 32.
+        Keycode 0 rejected; use `key: "select"`.
+      operationId: postDevSendKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DevSendKeyRequest'
+      responses:
+        '200':
+          description: Send steps (press/release, acked flags)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Adapter is in monitor-only mode
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/dev/send_opcode:
+    post:
+      tags: [Dev]
+      summary: Raw CEC opcode send (always blind)
+      description: >
+        Body `{"destination": 0, "opcode": 143, "params_hex": "01 02 ff"}`.
+        Params accept spaced or compact hex. Rejected with 409 while the
+        adapter is monitor-only.
+      operationId: postDevSendOpcode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [destination, opcode]
+              properties:
+                destination:
+                  type: integer
+                  minimum: 0
+                  maximum: 15
+                opcode:
+                  type: integer
+                  minimum: 0
+                  maximum: 255
+                params_hex:
+                  type: string
+                  description: Hex byte string ("01 02 ff" or "0102ff")
+      responses:
+        '200':
+          description: Opcode sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Adapter is in monitor-only mode
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/dev/run_strategies:
+    post:
+      tags: [Dev]
+      summary: Run the strategy chain for an action
+      description: |
+        Body `{"action": "volume_up", "target": 5, "all_strategies": false,
+        "observe_ms": 600}`. Runs are single-flight per connection: a second
+        concurrent run is rejected instead of interleaving frames on the bus.
+        `observe_ms` clamped to <= 5000.
+      operationId: postDevRunStrategies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  example: volume_up
+                target:
+                  type: integer
+                  minimum: 0
+                  maximum: 15
+                  nullable: true
+                  description: null = follow the strategy's own targets
+                all_strategies:
+                  type: boolean
+                observe_ms:
+                  type: integer
+      responses:
+        '200':
+          description: Strategy run results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Another strategy run is in flight, or adapter is monitor-only
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/dev/save_strategy:
+    post:
+      tags: [Dev]
+      summary: Install a winning strategy per vendor
+      description: >
+        Body `{"vendor": "0x000048", "action": "volume_up",
+        "strategy": "direct"}`. Persisted to config.json.
+      operationId: postDevSaveStrategy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [vendor, action, strategy]
+              properties:
+                vendor:
+                  type: string
+                  example: "0x000048"
+                action:
+                  type: string
+                  example: volume_up
+                strategy:
+                  type: string
+                  description: Strategy name from the bench/run result
+      responses:
+        '200':
+          description: Strategy saved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/dev/actions:
+    get:
+      tags: [Dev]
+      summary: List registry actions
+      operationId: getDevActions
+      responses:
+        '200':
+          description: Available actions and their strategies
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/dev/keys:
+    get:
+      tags: [Dev]
+      summary: List supported key names and keycodes
+      operationId: getDevKeys
+      responses:
+        '200':
+          description: Key name -> keycode table
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/dev/opcodes:
+    get:
+      tags: [Dev]
+      summary: List known CEC opcodes
+      operationId: getDevOpcodes
+      responses:
+        '200':
+          description: Opcode name/value table
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ────────────────────────────────── Web UI ──────────────────────────────
+  /:
+    get:
+      tags: [Web UI]
+      summary: Dashboard
+      description: HTML dashboard (HTMX-driven fragments, SSE live updates).
+      operationId: getDashboard
+      responses:
+        '200':
+          description: Dashboard page
+          content:
+            text/html: {}
+
+  /settings:
+    get:
+      tags: [Web UI]
+      summary: Settings page
+      operationId: getSettingsPage
+      responses:
+        '200':
+          description: Settings page
+          content:
+            text/html: {}
+
+  /dev:
+    get:
+      tags: [Web UI]
+      summary: Dev console page
+      operationId: getDevPage
+      responses:
+        '200':
+          description: Dev console page
+          content:
+            text/html: {}
+
+  /ui/static/{path}:
+    get:
+      tags: [Web UI]
+      summary: Embedded static assets
+      operationId: getUiStatic
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Static asset
+        '404':
+          description: Unknown asset
+
+  /ui/fragment/{name}:
+    get:
+      tags: [Web UI]
+      summary: HTMX dashboard fragment
+      operationId: getUiFragment
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [bus_banner, devices, device_power, mqtt_panel, health,
+                   topology_hdmi, volume_panel, nav_panel, source_panel, logs]
+      responses:
+        '200':
+          description: HTML fragment
+          content:
+            text/html: {}
+        '404':
+          description: Unknown fragment
+
+  /ui/action/{name}:
+    post:
+      tags: [Web UI]
+      summary: HTMX dashboard action
+      description: >
+        Form-encoded equivalents of the JSON control API. When token auth is
+        active, mutating actions require the token (cookie or header) AND a
+        same-origin request.
+      operationId: postUiAction
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [deep_scan, power_on, power_off, volume_up, volume_down,
+                   volume_mute, set_source, hdmi, nav_key, mqtt_save]
+      responses:
+        '200':
+          description: HTML fragment reflecting the action result
+          content:
+            text/html: {}
+        '400':
+          description: Bad form parameters
+        '403':
+          description: Cross-site/mutating request rejected
+        '404':
+          description: Unknown action
+
+  /ui/dev/fragment/{name}:
+    get:
+      tags: [Web UI]
+      summary: HTMX dev-console fragment
+      operationId: getUiDevFragment
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [banner, devices, trace]
+      responses:
+        '200':
+          description: HTML fragment
+          content:
+            text/html: {}
+        '404':
+          description: Unknown fragment
+
+  /ui/dev/action/{name}:
+    post:
+      tags: [Web UI]
+      summary: HTMX dev-console action
+      description: Form-encoded equivalent of the matching /api/dev/* route.
+      operationId: postUiDevAction
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [mode, probe, send_key, send_opcode, run_strategies, save_strategy]
+      responses:
+        '200':
+          description: HTML fragment reflecting the action result
+          content:
+            text/html: {}
+        '400':
+          description: Bad form parameters
+        '403':
+          description: Cross-site/mutating request rejected
+        '404':
+          description: Unknown action
+
 components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        Optional. Active only when the server runs with a token
+        (`-token <secret>`). `X-Auth-Token`, `?key=`, and the `capi_token`
+        cookie are accepted equivalently. When no token is configured this
+        security requirement is a no-op.
+
   parameters:
     LogicalAddress:
       name: address
       in: path
       required: true
-      description: CEC logical address (0-15). 0=TV, 1=Rec 1, 2=Rec 2, 3=Tuner 1, 4=Playback 1, 5=Audio, etc.
       schema:
         type: integer
         minimum: 0
         maximum: 15
+      description: CEC logical address (0-15; 15 is the broadcast address)
 
   schemas:
     ApiResponse:
       type: object
-      required: [status, message]
+      description: >
+        Standard envelope. `message` omitted when empty; `data` omitted when
+        absent. Async acceptance returns success with data.accepted=true.
+      required: [status]
       properties:
         status:
           type: string
           enum: [success, error]
         message:
           type: string
-          description: Human-readable message
+          description: Human-readable message (omitted when empty)
         data:
-          description: Response payload (varies by endpoint)
+          description: Response payload (varies by endpoint; omitted when absent)
           nullable: true
 
     Device:
@@ -838,11 +1254,10 @@ components:
           example: "0.0.0.0"
         device_type:
           type: string
-          description: CEC device type
           example: TV
         hdmi_port:
           type: integer
-          description: HDMI port number derived from physical address (0 if not applicable)
+          description: HDMI port derived from physical address (0 if not applicable)
           example: 1
         vendor_id:
           type: string
@@ -862,6 +1277,58 @@ components:
           type: boolean
         is_active_source:
           type: boolean
+        discovery:
+          type: string
+          enum: [active, polled, observed]
+          description: >
+            active = enumerated by libCEC; polled = confirmed by POLL probe;
+            observed = ghost inferred from passive bus traffic.
+        polled_at:
+          type: string
+          format: date-time
+          description: Last active/poll probe of this address (RFC3339Nano)
+        first_seen_at:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: string
+          format: date-time
+        observed_at:
+          type: string
+          format: date-time
+          description: Timestamp of the newest observed_* field update
+        observed_power_status:
+          type: string
+        observed_vendor_id:
+          type: string
+        observed_vendor_name:
+          type: string
+        observed_physical_address:
+          type: string
+        observed_device_type:
+          type: integer
+        observed_audio_muted:
+          type: boolean
+        observed_audio_volume_raw:
+          type: integer
+        observed_active_source_physical:
+          type: string
+        observed_osd_name_fragment:
+          type: string
+        observed_routing_physical:
+          type: string
+        observed_deck_status:
+          type: integer
+        observed_tuner_status_hex:
+          type: string
+        observed_menu_state:
+          type: integer
+        observed_system_audio_mode:
+          type: integer
+        observed_last_feature_abort_opcode:
+          type: integer
+        observed_last_feature_abort_reason:
+          type: integer
 
     TopologyResponse:
       type: object
@@ -870,13 +1337,10 @@ components:
           type: array
           items:
             type: integer
-          description: Logical addresses owned by this adapter
         own_port:
           type: integer
-          description: HDMI port this adapter is connected to
         known_port_count:
           type: integer
-          description: Number of known HDMI ports on the TV
         active_ports:
           type: array
           items:
@@ -887,12 +1351,10 @@ components:
       properties:
         port:
           type: integer
-          description: HDMI port number
         devices:
           type: array
           items:
             type: string
-          description: OSD names of devices on this port
 
     AudioStatus:
       type: object
@@ -901,41 +1363,34 @@ components:
           type: integer
           minimum: 0
           maximum: 100
-          description: Volume percentage for UI (clamped to 0–100 when CEC reports >100)
+          description: Volume percentage for UI (clamped to 0-100 when CEC reports >100)
         volume_raw:
           type: integer
           minimum: 0
           maximum: 255
-          description: Raw volume byte from CEC `Report Audio Status` (0–100 typical; some devices send higher)
         raw_status:
           type: integer
           minimum: 0
           maximum: 255
-          description: Full first status byte from libCEC (includes mute bit in high nibble per CEC spec)
         muted:
           type: boolean
-          description: Whether audio is muted
 
     MQTTSettingsResponse:
       type: object
       properties:
         broker:
           type: string
-          description: MQTT broker URL
           example: "tcp://localhost:1883"
         user:
           type: string
-          description: MQTT username
         pass:
           type: string
           description: Masked password ("***" if set, "" if empty)
         prefix:
           type: string
-          description: MQTT topic prefix
           example: capi
         connected:
           type: boolean
-          description: Whether the MQTT client is currently connected
 
     MQTTSettingsRequest:
       type: object
@@ -946,13 +1401,11 @@ components:
           example: "tcp://localhost:1883"
         user:
           type: string
-          description: MQTT username (optional)
         pass:
           type: string
           description: MQTT password (send "***" to keep existing password)
         prefix:
           type: string
-          description: MQTT topic prefix (defaults to "capi" if empty)
           example: capi
 
     KeyRequest:
@@ -966,25 +1419,75 @@ components:
           description: Target device logical address
         key:
           type: string
-          description: Key name (use when keycode is not provided)
+          description: Key name (preferred; use when keycode is not provided)
           enum:
+            - select
             - up
             - down
             - left
             - right
-            - select
-            - enter
-            - back
+            - right_up
+            - right_down
+            - left_up
+            - left_down
+            - root_menu
             - home
+            - setup_menu
             - menu
+            - contents_menu
+            - favorite_menu
+            - exit
+            - back
+            - enter
+            - clear
+            - '0'
+            - '1'
+            - '2'
+            - '3'
+            - '4'
+            - '5'
+            - '6'
+            - '7'
+            - '8'
+            - '9'
+            - dot
+            - channel_up
+            - channel_down
+            - previous_channel
+            - sound_select
+            - input_select
+            - display_information
+            - help
+            - page_up
+            - page_down
+            - power
+            - volume_up
+            - volume_down
+            - mute
             - play
-            - pause
             - stop
+            - pause
+            - record
+            - rewind
+            - fast_forward
+            - eject
+            - forward
+            - backward
+            - angle
+            - subpicture
+            - f1_blue
+            - f2_red
+            - f3_green
+            - f4_yellow
+            - f5
         keycode:
           type: integer
-          minimum: 0
+          minimum: 1
           maximum: 255
-          description: Raw CEC keycode (use for keycode 0 = Select or other codes)
+          exclusiveMinimum: 0
+          description: >
+            Raw CEC keycode. **0 is rejected** with an explicit error message;
+            send `{"key": "select"}` for Select instead.
       oneOf:
         - required: [key]
         - required: [keycode]
@@ -997,17 +1500,17 @@ components:
           type: integer
           minimum: 0
           maximum: 15
-          description: Source logical address
         destination:
           type: integer
           minimum: 0
           maximum: 15
-          description: Target logical address
+          description: >
+            Target logical address. 15 (broadcast) is accepted at the raw
+            command layer; control endpoints reject 15 with 400.
         opcode:
           type: integer
           minimum: 0
           maximum: 255
-          description: CEC opcode
         parameters:
           type: array
           maxItems: 14
@@ -1022,12 +1525,98 @@ components:
       properties:
         level:
           type: string
-          enum: [ERROR, WARNING, NOTICE, TRAFFIC, DEBUG]
+          enum: [CEC, APP, ERROR, WARN, INFO, DEBUG]
         timestamp:
           type: string
           format: date-time
         message:
           type: string
+
+    BusFrame:
+      type: object
+      properties:
+        seq:
+          type: integer
+          description: Monotonic sequence number; diffs use seq, never ring index
+        timestamp:
+          type: string
+          format: date-time
+        initiator:
+          type: integer
+        destination:
+          type: integer
+        opcode:
+          type: string
+          example: "0x44"
+        params_hex:
+          type: string
+
+    EventMessage:
+      type: object
+      description: Wire format shared by SSE, WebSocket, and MQTT event topics.
+      required: [type, timestamp]
+      properties:
+        type:
+          type: string
+          enum: [power_change, source_activated, key_press, command, alert,
+                 devices_changed, configuration_changed, adapter_state]
+        timestamp:
+          type: string
+          format: date-time
+        data:
+          type: object
+          description: Type-specific payload (see README "MQTT" for per-type examples)
+          additionalProperties: true
+
+    ProbeStep:
+      type: object
+      properties:
+        name:
+          type: string
+          example: give_power
+        opcode:
+          type: string
+          example: "0x8F"
+        error:
+          type: string
+        replies:
+          type: array
+          items:
+            $ref: '#/components/schemas/BusFrame'
+        result:
+          type: string
+          enum: [ok, acked_no_reply, feature_aborted, error]
+        abort_opcode:
+          type: integer
+        elapsed_ms:
+          type: integer
+
+    DevSendKeyRequest:
+      type: object
+      required: [address]
+      properties:
+        address:
+          type: integer
+          minimum: 0
+          maximum: 14
+          description: Destination (raw; never refused for "not active")
+        key:
+          type: string
+          description: Canonical key name (preferred; see /api/dev/keys)
+        keycode:
+          type: integer
+          minimum: 1
+          maximum: 255
+          description: Used when key is empty; 0 rejected
+        hold_ms:
+          type: integer
+          description: Pause between press and release (0 = no release; clamped <= 2000)
+        wait:
+          type: boolean
+          description: libcec wait-for-ack on press/release
+        repeat:
+          type: integer
+          description: Press the key N times back-to-back (clamped <= 32)
 
   responses:
     BadRequest:

@@ -1,0 +1,14 @@
+{% if ctx.frames.is_empty() %}
+<tr class="trace-empty"><td colspan="6">No frames captured yet &mdash; enable monitoring or send a command.</td></tr>
+{% else %}
+{% for f in ctx.frames %}
+<tr data-frame>
+  <td class="mono dim">{{ f.time }}</td>
+  <td class="mono">{{ f.initiator }}</td>
+  <td class="mono">{{ f.destination }}</td>
+  <td class="mono">{{ f.opcode }}</td>
+  <td>{% if f.ack %}<span class="badge badge-ok">ack</span>{% else %}<span class="badge badge-dim">&ndash;</span>{% endif %}</td>
+  <td class="mono trace-params">{{ f.params }}</td>
+</tr>
+{% endfor %}
+{% endif %}

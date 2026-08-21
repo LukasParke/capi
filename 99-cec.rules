@@ -3,5 +3,6 @@
 # Built-in HDMI CEC (e.g. Raspberry Pi /dev/cec0)
 SUBSYSTEM=="cec", KERNEL=="cec[0-9]*", MODE="0660", GROUP="capi"
 
-# Pulse-Eight USB-CEC adapters (USB vendor ID 0x2548)
-SUBSYSTEM=="tty", ATTRS{idVendor}=="2548", MODE="0660", GROUP="capi"
+# Pulse-Eight USB-CEC adapters (USB vendor ID 0x2548). KERNEL= qualifier keeps
+# the rule scoped to serial devices (ttyACM*/ttyUSB*) instead of any tty event.
+SUBSYSTEM=="tty", KERNEL=="ttyACM[0-9]*|ttyUSB[0-9]*", ATTRS{idVendor}=="2548", MODE="0660", GROUP="capi"

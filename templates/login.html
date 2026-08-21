@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Sign in · capi</title>
+  <link rel="stylesheet" href="/ui/static/style.css">
+  <script src="/ui/static/app.js" defer></script>
+</head>
+<body class="auth-body">
+  <main class="auth-wrap">
+    <section class="card auth-card" aria-labelledby="auth-heading">
+      <div class="auth-brand" aria-hidden="true">
+        <svg class="brand-mark" viewBox="0 0 20 20" focusable="false">
+          <rect x="1.5" y="1.5" width="17" height="17" rx="4.5" fill="none" stroke="currentColor" stroke-width="1.6"/>
+          <path d="M4.5 10h3l1.6-4 2.4 8 1.6-4h2.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="brand-name">capi</span>
+      </div>
+      <h1 id="auth-heading">Sign in to capi</h1>
+      <p class="dim">Enter the access token configured as <code>auth_token</code> in <code>config.json</code>.</p>
+      {% if !error.is_empty() %}
+      <p class="form-error" role="alert">{{ error }}</p>
+      {% endif %}
+      <form method="post" action="/login" class="auth-form">
+        <label class="field">
+          <span>Access token</span>
+          <input class="input" type="password" name="token" autocomplete="current-password" autofocus required>
+        </label>
+        <button class="btn btn-primary btn-block" type="submit">Sign in</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

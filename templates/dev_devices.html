@@ -1,0 +1,36 @@
+{% if ctx.devices.is_empty() %}
+<div class="empty-state">
+  <p><strong>No devices discovered yet</strong> &mdash; scanning&hellip;</p>
+  <button class="btn btn-primary" type="button" hx-post="/ui/action/deep_scan" hx-swap="none">Run deep scan</button>
+</div>
+{% else %}
+<div class="grid-devices grid-devices-compact">
+  {% for d in ctx.devices %}
+  <article class="device-card{% if d.is_active_source %} is-active-source{% endif %}{% if d.is_ghost %} is-ghost{% endif %}" data-la="{{ d.logical_address }}">
+    <header class="device-head">
+      <div class="device-title">
+        <h3 class="device-name">{{ d.display_name }}</h3>
+        <p class="device-meta">{{ d.address_name }} &middot; LA {{ d.logical_address }}</p>
+      </div>
+      {% if d.power_status == "on" %}
+      <span class="badge badge-ok">On</span>
+      {% else %}{% if d.power_status == "standby" %}
+      <span class="badge badge-warn">Standby</span>
+      {% else %}
+      <span class="badge badge-dim">Unknown</span>
+      {% endif %}{% endif %}
+    </header>
+    <div class="chip-row">
+      <span class="chip chip-role">{{ d.role }}</span>
+      {% if d.discovery == "observed" %}<span class="badge badge-ghost" title="Seen in traffic but never polled directly">Ghost</span>{% endif %}
+      {% if d.is_active_source %}<span class="badge badge-accent">Active source</span>{% endif %}
+    </div>
+    <dl class="device-facts">
+      <div><dt>Vendor</dt><dd>{{ d.vendor_name }} <span class="mono dim">{{ d.vendor_id }}</span></dd></div>
+      <div><dt>Last seen</dt><dd class="dim">{{ d.last_seen }}</dd></div>
+    </dl>
+  </article>
+  {% endfor %}
+</div>
+{% endif %}
+{% if !ctx.message.is_empty() %}<p class="panel-note dim">{{ ctx.message }}</p>{% endif %}

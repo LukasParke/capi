@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cross-compile capi for ARM via Docker + QEMU.
+# Cross-compile the Rust capi binary for ARM via Docker + QEMU.
 #
 # Usage:
 #   scripts/cross-build.sh [ARCH] [LIBCEC]
@@ -9,9 +9,9 @@
 # Produces dist/capi-linux-${ARCH}-libcec${LIBCEC}.
 #
 # First run for a given (ARCH, LIBCEC) builds the builder image (slow:
-# apt install over QEMU). Subsequent runs reuse the image and a named Go
-# build cache volume; an incremental build typically completes in <30s on
-# a fast x86 machine.
+# rustup + apt install over QEMU). Subsequent runs reuse the image and named
+# rustup/cargo cache volumes; an incremental build typically completes in
+# well under a minute on a fast x86 machine.
 #
 # Prerequisites: Docker. For non-native architectures, run once:
 #   docker run --privileged --rm tonistiigi/binfmt --install all
@@ -25,13 +25,18 @@ LIBCEC="${2:-6}"
 case "$ARCH" in
   arm64)
     PLATFORM="linux/arm64"
-    GO_TARBALL="go1.25.2.linux-arm64.tar.gz"
-    GOARM=""
+    # Host toolchain triple inside the emulated container.
+    RUST_TRIPLE="aarch64-unknown-linux-gnu"
+    RUST_TARGET=""
     ;;
   armv6)
+    # The container runs armv7 userland under QEMU, but Pi 1 / Zero are
+    # armv6: add the arm-unknown-linux-gnueabihf target and point cargo's
+    # linker for it at the container's own gnueabihf gcc so the emitted
+    # code is armv6-compatible.
     PLATFORM="linux/arm/v7"
-    GO_TARBALL="go1.25.2.linux-armv6l.tar.gz"
-    GOARM="6"
+    RUST_TRIPLE="armv7-unknown-linux-gnueabihf"
+    RUST_TARGET="arm-unknown-linux-gnueabihf"
     ;;
   *)
     echo "ERROR: unknown ARCH '$ARCH' (expected arm64 or armv6)"
@@ -56,8 +61,8 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-# QEMU sanity check: try to ls inside the target-platform image. If it
-# fails with "exec format error", binfmt isn't set up.
+# QEMU sanity check: try to run a no-op inside the target-platform image. If
+# it fails with "exec format error", binfmt isn't set up.
 if ! docker run --rm --platform="$PLATFORM" "$BASE_IMAGE" /bin/true 2>/dev/null; then
   echo "ERROR: cannot run $PLATFORM containers on this host."
   echo "Install QEMU binfmt support, e.g.:"
@@ -73,7 +78,6 @@ echo "==> ensuring builder image $BUILDER_TAG"
 docker build --platform="$PLATFORM" \
   -t "$BUILDER_TAG" \
   --build-arg BASE_IMAGE="$BASE_IMAGE" \
-  --build-arg GO_TARBALL="$GO_TARBALL" \
   -f dockerfiles/builder.Dockerfile dockerfiles/
 
 VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
@@ -83,11 +87,29 @@ OUT="dist/capi-linux-${ARCH}-libcec${LIBCEC}"
 echo "==> building $OUT (version $VERSION)"
 docker run --rm --platform="$PLATFORM" \
   -v "$ROOT:/workspace" \
-  -v capi-go-cache:/go \
-  -e GOARM="$GOARM" \
+  -v capi-rustup-cache:/usr/local/rustup \
+  -v capi-cargo-cache:/usr/local/cargo \
+  -e RUSTUP_HOME=/usr/local/rustup \
+  -e CARGO_HOME=/usr/local/cargo \
+  -e RUST_TRIPLE="$RUST_TRIPLE" \
+  -e RUST_TARGET="$RUST_TARGET" \
+  -e CAPI_VERSION="$VERSION" \
   -e VERSION="$VERSION" \
+  -e OUT_NAME="$(basename "$OUT")" \
   "$BUILDER_TAG" \
-  bash -c "go build -ldflags \"-X main.version=\${VERSION} -s -w\" -o \"$OUT\" ./capi"
+  bash -s <<'BUILD'
+set -euxo pipefail
+export PATH="/usr/local/cargo/bin:${PATH}"
+if [[ -n "${RUST_TARGET}" ]]; then
+  rustup target list --installed | grep -qx "${RUST_TARGET}" || rustup target add "${RUST_TARGET}"
+  export CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc
+  cargo build --release --locked --target "${RUST_TARGET}"
+  cp "target/${RUST_TARGET}/release/capi" "/workspace/dist/${OUT_NAME}"
+else
+  cargo build --release --locked
+  cp target/release/capi "/workspace/dist/${OUT_NAME}"
+fi
+BUILD
 
 ls -lh "$ROOT/$OUT"
 echo "==> built $OUT"

@@ -1,0 +1,31 @@
+<section class="card">
+  <header class="card-head">
+    <h2>Volume</h2>
+    {% if ctx.audio_available %}{% if ctx.audio_muted %}<span class="badge badge-err">Muted</span>{% else %}<span class="badge badge-ok">Live</span>{% endif %}{% endif %}
+  </header>
+  {% if ctx.audio_available %}
+  <div class="volume-row">
+    <button type="button" class="btn btn-huge" data-repeat aria-label="Volume down"
+            hx-post="/ui/action/volume_down" hx-swap="none">
+      <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M4.5 10h11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
+    <div class="level-bar" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ ctx.audio_display_volume }}" aria-label="Volume level">
+      <div class="level-fill{% if ctx.audio_muted %} is-muted{% endif %}" data-level-fill style="width: {{ ctx.audio_display_volume }}%"></div>
+    </div>
+    <button type="button" class="btn btn-huge" data-repeat aria-label="Volume up"
+            hx-post="/ui/action/volume_up" hx-swap="none">
+      <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M10 4.5v11M4.5 10h11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+  <div class="volume-meta">
+    <span class="mono volume-value">{{ ctx.audio_display_volume }}</span>
+    <button type="button" class="btn btn-small{% if ctx.audio_muted %} btn-danger{% endif %}" aria-pressed="{% if ctx.audio_muted %}true{% else %}false{% endif %}"
+            hx-post="/ui/action/volume_mute" hx-swap="none">{% if ctx.audio_muted %}Unmute{% else %}Mute{% endif %}</button>
+  </div>
+  {% else %}
+  <div class="empty-state empty-compact">
+    <p class="dim">No audio system detected on the bus.</p>
+    <p class="dim small">Volume controls appear once a device at logical address 5 (audio system) reports its status.</p>
+  </div>
+  {% endif %}
+</section>

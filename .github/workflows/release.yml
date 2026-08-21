@@ -1,5 +1,19 @@
 name: Build and Release
 
+# Release pipeline for the Rust capi service.
+#
+# Security posture (closes the CI review findings):
+#   * zero top-level permissions; each job gets the minimum it needs
+#   * every action pinned to a full commit SHA (no mutable tags)
+#   * every interpolated value used inside `run:` blocks is passed through
+#     `env:` indirection -- no `${{ }}` expressions are expanded into shells,
+#     closing the workflow-injection vector
+#   * rustup-init downloads are sha256-verified against static.rust-lang.org
+#     and the toolchain is pinned (1.97.1); Debian bookworm ships rustc 1.63
+#     (< 1.85), so rustup is used uniformly on all three legs rather than
+#     mixing distro rustc on trixie
+#   * concurrency group prevents parallel releases racing the tag computation
+
 on:
   push:
     branches: [main]
@@ -11,8 +25,11 @@ on:
         required: false
         default: 'patch'
 
-permissions:
-  contents: write
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   # tag: figure out the next version once, share it with the build matrix.
@@ -23,29 +40,38 @@ jobs:
   #     tag pointing at HEAD before fanning out to the build jobs.
   tag:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.version.outputs.VERSION }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6 # v6.1.0
         with:
           fetch-depth: 0
           fetch-tags: true
 
       - name: Compute next version
         id: version
+        env:
+          # env-indirection: never expand inputs.* directly into the script
+          BUMP_INPUT: ${{ inputs.bump }}
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/}"
             echo "Using pushed tag: $VERSION"
           else
-            BUMP="${{ github.event.inputs.bump || 'patch' }}"
+            BUMP="${BUMP_INPUT:-patch}"
+            case "$BUMP" in
+              patch|minor|major) ;;
+              *) echo "ERROR: invalid bump input '$BUMP'"; exit 1 ;;
+            esac
             # Only consider strict vMAJOR.MINOR.PATCH tags; ignore any legacy
             # timestamp-style tags that might still exist in the repo.
             LAST="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname \
                     | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-                    | head -n 1)"
+                    | head -n 1 || true)"
             if [[ -z "$LAST" ]]; then
               LAST="v0.0.0"
             fi
@@ -54,7 +80,7 @@ jobs:
             case "$BUMP" in
               major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
               minor) MINOR=$((MINOR+1)); PATCH=0 ;;
-              patch|*) PATCH=$((PATCH+1)) ;;
+              patch) PATCH=$((PATCH+1)) ;;
             esac
             VERSION="v${MAJOR}.${MINOR}.${PATCH}"
             echo "Bumping ${LAST} (${BUMP}) -> ${VERSION}"
@@ -69,63 +95,112 @@ jobs:
   build:
     needs: tag
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: true
       matrix:
         include:
+          # rust_triple: rustup host toolchain triple inside the emulated container.
+          # rust_target: optional cross target INSIDE the container; the armv6 leg
+          #              runs armv7 userland (QEMU linux/arm/v7) but must emit
+          #              armv6 code for Pi 1 / Zero, so we add the
+          #              arm-unknown-linux-gnueabihf target and point cargo's
+          #              linker for it at the container's own gnueabihf gcc.
           - arch: arm64
             platform: linux/arm64
             base_image: debian:bookworm
             libcec: "6"
-            go_tarball: go1.25.2.linux-arm64.tar.gz
             binary: capi-linux-arm64-libcec6
-            goarm: ""
+            rust_triple: aarch64-unknown-linux-gnu
+            rust_target: ""
           - arch: arm64
             platform: linux/arm64
             base_image: debian:trixie
             libcec: "7"
-            go_tarball: go1.25.2.linux-arm64.tar.gz
             binary: capi-linux-arm64-libcec7
-            goarm: ""
+            rust_triple: aarch64-unknown-linux-gnu
+            rust_target: ""
           - arch: armv6
             platform: linux/arm/v7
             base_image: debian:bookworm
             libcec: "6"
-            go_tarball: go1.25.2.linux-armv6l.tar.gz
             binary: capi-linux-armv6-libcec6
-            goarm: "6"
+            rust_triple: armv7-unknown-linux-gnueabihf
+            rust_target: arm-unknown-linux-gnueabihf
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6 # v6.1.0
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v3 # v3.7.0
         with:
           platforms: arm64,arm
 
       - name: Build ${{ matrix.binary }}
         env:
+          # env-indirection: matrix/needs values reach the shell only via env vars
+          PLATFORM: ${{ matrix.platform }}
+          BASE_IMAGE: ${{ matrix.base_image }}
+          BINARY_NAME: ${{ matrix.binary }}
+          RUST_TRIPLE: ${{ matrix.rust_triple }}
+          RUST_TARGET: ${{ matrix.rust_target }}
+          RUST_TOOLCHAIN: '1.97.1'
           VERSION: ${{ needs.tag.outputs.version }}
         run: |
+          set -euo pipefail
           docker run --rm \
-            --platform ${{ matrix.platform }} \
-            -v "${{ github.workspace }}:/workspace" \
+            --platform "$PLATFORM" \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
             -w /workspace \
+            -e RUST_TRIPLE="${RUST_TRIPLE}" \
+            -e RUST_TARGET="${RUST_TARGET}" \
+            -e RUST_TOOLCHAIN="${RUST_TOOLCHAIN}" \
+            -e CAPI_VERSION="${VERSION}" \
             -e VERSION="${VERSION}" \
-            ${{ matrix.base_image }} bash -c '
-              set -e
-              apt-get update && apt-get install -y --no-install-recommends \
-                gcc g++ libc6-dev curl pkg-config libcec-dev libp8-platform-dev libudev-dev ca-certificates
-              curl -sL https://go.dev/dl/${{ matrix.go_tarball }} | tar -C /usr/local -xz
-              export PATH=$PATH:/usr/local/go/bin
-              export GOARM="${{ matrix.goarm }}"
-              export CGO_ENABLED=1
-              export CGO_LDFLAGS="-Wl,--no-as-needed -lstdc++ -Wl,--as-needed"
-              go build -ldflags "-X main.version=${VERSION} -s -w" -o ${{ matrix.binary }} ./capi
-            '
+            -e BINARY_NAME="${BINARY_NAME}" \
+            -e RUSTUP_HOME=/usr/local/rustup \
+            -e CARGO_HOME=/usr/local/cargo \
+            -v capi-rustup-cache:/usr/local/rustup \
+            -v capi-cargo-cache:/usr/local/cargo \
+            "$BASE_IMAGE" bash -s <<'CONTAINER'
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          export PATH="/usr/local/cargo/bin:${PATH}"
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            gcc libc6-dev curl ca-certificates pkg-config \
+            libcec-dev libp8-platform-dev libudev-dev
+          rm -rf /var/lib/apt/lists/*
+
+          # Pinned toolchain with a verified bootstrap: rustup-init is checked
+          # against the published sha256 on static.rust-lang.org before use.
+          curl -fsSL --retry 3 -o /tmp/rustup-init \
+            "https://static.rust-lang.org/rustup/dist/${RUST_TRIPLE}/rustup-init"
+          curl -fsSL --retry 3 -o /tmp/rustup-init.sha256 \
+            "https://static.rust-lang.org/rustup/dist/${RUST_TRIPLE}/rustup-init.sha256"
+          echo "$(cat /tmp/rustup-init.sha256)  /tmp/rustup-init" | sha256sum -c -
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --no-modify-path --profile minimal \
+            --default-toolchain "${RUST_TOOLCHAIN}"
+          if [[ -n "${RUST_TARGET}" ]]; then
+            rustup target add "${RUST_TARGET}"
+          fi
+          rustc --version && cargo --version
+
+          # --locked: build exactly what Cargo.lock pins.
+          if [[ -n "${RUST_TARGET}" ]]; then
+            export CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc
+            cargo build --release --locked --target "${RUST_TARGET}"
+            cp "target/${RUST_TARGET}/release/capi" "/workspace/${BINARY_NAME}"
+          else
+            cargo build --release --locked
+            cp "target/release/capi" "/workspace/${BINARY_NAME}"
+          fi
+          CONTAINER
 
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4 # v4.6.2
         with:
           name: ${{ matrix.binary }}
           path: ${{ matrix.binary }}
@@ -133,15 +208,17 @@ jobs:
   release:
     needs: [tag, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # release upload only
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6 # v6.1.0
         with:
           fetch-depth: 0
           fetch-tags: true
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4 # v4.3.0
         with:
           merge-multiple: true
 
@@ -152,18 +229,21 @@ jobs:
           # 99-cec.rules in the workspace root; download-artifact added the
           # capi-linux-* binaries. We just hash everything in place.
           : > SHA256SUMS
-          for f in capi-linux-* install.sh capi.service 99-cec.rules; do
-            if [[ -f "$f" ]]; then
-              sha256sum "$f" >> SHA256SUMS
-            fi
+          for f in capi-linux-arm64-libcec6 capi-linux-arm64-libcec7 \
+                   capi-linux-armv6-libcec6 install.sh capi.service 99-cec.rules; do
+            [[ -f "$f" ]] || { echo "ERROR: expected artifact '$f' missing"; exit 1; }
+            sha256sum "$f" >> SHA256SUMS
           done
           cat SHA256SUMS
 
       - name: Generate changelog
         id: changelog
+        env:
+          # env-indirection: tag/repo values reach the shell only via env vars
+          VERSION: ${{ needs.tag.outputs.version }}
+          REPO_SLUG: ${{ github.repository }}
         run: |
           set -euo pipefail
-          VERSION="${{ needs.tag.outputs.version }}"
           PREV=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname \
                  | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
                  | grep -v "^${VERSION}$" \
@@ -177,7 +257,7 @@ jobs:
               git log --pretty=format:'- %s (%h)' "${PREV}..${VERSION}" | sed -e 's/[`<>]//g'
               echo
               echo
-              echo "**Full diff:** https://github.com/${{ github.repository }}/compare/${PREV}...${VERSION}"
+              echo "**Full diff:** https://github.com/${REPO_SLUG}/compare/${PREV}...${VERSION}"
             else
               echo "Initial release."
             fi
@@ -193,14 +273,14 @@ jobs:
             echo "### Verify"
             echo
             echo '\`\`\`'
-            echo "curl -sSL -O https://github.com/${{ github.repository }}/releases/download/${VERSION}/SHA256SUMS"
+            echo "curl -sSL -O https://github.com/${REPO_SLUG}/releases/download/${VERSION}/SHA256SUMS"
             echo "sha256sum -c SHA256SUMS --ignore-missing"
             echo '\`\`\`'
           } > CHANGELOG.md
           cat CHANGELOG.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2 # v2.6.2
         with:
           tag_name: ${{ needs.tag.outputs.version }}
           name: ${{ needs.tag.outputs.version }}

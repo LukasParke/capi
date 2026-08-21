@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
-# Push this repo to a Raspberry Pi, build with Go + libcec on the Pi, install to /opt/capi, restart systemd.
+# Push the Rust source tree to a Raspberry Pi, build it there with cargo +
+# libcec on-device, install to /opt/capi with backup + health-gated rollback,
+# and restart systemd. Slower fallback for hosts without Docker/QEMU; prefer
+# scripts/push-pi.sh (cross-build + binary push) for iteration.
 #
-# Pi one-time setup: Go in /usr/local/go, pkg-config, libcec-dev, libcec7, libp8-platform-dev, libudev-dev, build-essential
-# (same as a manual on-device build).
+# Pi one-time setup: rustup (or distro rustc >= 1.85), pkg-config,
+# libcec-dev libp8-platform-dev libudev-dev build-essential.
 #
 # Repo root .env (gitignored), e.g.:
 #   SSH_USER=luke
 #   SSH_IP=10.10.10.205
 #   SSH_PASSWORD=...          # omit if you use SSH keys only
-#   SUDO_PASSWORD=...           # optional; defaults to SSH_PASSWORD for sudo -S
+#   SUDO_PASSWORD=...         # optional; defaults to SSH_PASSWORD for sudo -S
+#
+# The systemd unit is NOT clobbered: if the installed unit differs from the
+# repo copy, this script only warns and points you at install.sh.
 
 set -euo pipefail
 
@@ -16,10 +22,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 if [[ ! -f .env ]]; then
-  echo "ERROR: Missing .env in $ROOT"
+  echo "ERROR: Missing .env in $ROOT (copy .env.example)."
   echo "Add SSH_USER, SSH_IP, and SSH_PASSWORD (or use key-based SSH with no password)."
   exit 1
 fi
+
+for f in Cargo.toml Cargo.lock build.rs src; do
+  [[ -e "$ROOT/$f" ]] || { echo "ERROR: missing $f in the Rust tree; nothing to build."; exit 1; }
+done
 
 # shellcheck disable=SC1091
 set -a
@@ -38,43 +48,47 @@ fi
 PASS_REMOTE=$(printf 'PASS=%q\n' "$SUDO_PASS")
 
 SSH_TARGET="${SSH_USER}@${SSH_IP}"
-SSH_OPTS=( -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new )
+# StrictHostKeyChecking=accept-new is TOFU: fine against your own LAN Pi, but
+# pin the host key out-of-band via CAPI_KNOWN_HOSTS for anything sensitive:
+#   CAPI_KNOWN_HOSTS=~/.ssh/capi_pi_known_hosts scripts/deploy-pi.sh
+if [[ -n "${CAPI_KNOWN_HOSTS:-}" ]]; then
+  SSH_OPTS=( -o ConnectTimeout=30 -o StrictHostKeyChecking=yes
+             -o UserKnownHostsFile="${CAPI_KNOWN_HOSTS}" )
+else
+  SSH_OPTS=( -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new )
+fi
 
-sshpass_wrap() {
+# sshpass -e reads the password from the SSHPASS environment variable so it
+# never appears in argv (unlike `sshpass -p`, visible in /proc/*/cmdline).
+ssh_wrap() {
   if [[ -n "${SSH_PASSWORD:-}" ]]; then
-    if command -v sshpass &>/dev/null; then
-      sshpass -p "$SSH_PASSWORD" "$@"
-    elif [[ -x /tmp/sshpass-local/bin/sshpass ]]; then
-      /tmp/sshpass-local/bin/sshpass -p "$SSH_PASSWORD" "$@"
-    else
+    if ! command -v sshpass >/dev/null 2>&1; then
       echo "ERROR: sshpass not found but SSH_PASSWORD is set."
       echo "Install sshpass, or remove SSH_PASSWORD and use SSH keys."
       exit 1
     fi
+    SSHPASS="$SSH_PASSWORD" sshpass -e "$@"
   else
     "$@"
   fi
 }
 
 run_ssh() {
-  if [[ -n "${SSH_PASSWORD:-}" ]]; then
-    sshpass_wrap ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "$@"
-  else
-    ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "$@"
-  fi
+  ssh_wrap ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "$@"
 }
 
-echo "==> Syncing repo to ${SSH_TARGET}:~/capi-src ..."
-tar czf - \
-  --exclude='./.git' \
-  --exclude='./capi-server' \
-  --exclude='./.env' \
-  . 2>/dev/null \
-  | if [[ -n "${SSH_PASSWORD:-}" ]]; then
-      sshpass_wrap ssh "${SSH_OPTS[@]}" "$SSH_TARGET" 'rm -rf ~/capi-src && mkdir -p ~/capi-src && tar xzf - -C ~/capi-src'
-    else
-      ssh "${SSH_OPTS[@]}" "$SSH_TARGET" 'rm -rf ~/capi-src && mkdir -p ~/capi-src && tar xzf - -C ~/capi-src'
-    fi
+echo "==> Syncing Rust tree to ${SSH_TARGET}:~/capi-src ..."
+# Only the files the on-device cargo build needs; never the .env secrets.
+rsync -az --delete \
+  -e "ssh ${SSH_OPTS[*]}" \
+  --include='Cargo.toml' \
+  --include='Cargo.lock' \
+  --include='build.rs' \
+  --include='/src/***' \
+  --include='/templates/***' \
+  --include='/static/***' \
+  --exclude='*' \
+  "$ROOT/" "${SSH_TARGET}:capi-src/"
 
 VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
 
@@ -84,19 +98,76 @@ run_ssh bash -s <<EOF
 ${PASS_REMOTE}
 set -euo pipefail
 cd ~/capi-src
-export PATH="/usr/local/go/bin:\$PATH"
+
+sudo() { printf '%s\n' "\$PASS" | command sudo -S "\$@"; }
+
+# Toolchain: prefer rustup's cargo, fall back to a distro rustc new enough
+# for the 2024-edition workspace.
+if [ -x "\$HOME/.cargo/bin/cargo" ]; then
+  export PATH="\$HOME/.cargo/bin:\$PATH"
+fi
+command -v cargo >/dev/null 2>&1 || {
+  echo "ERROR: cargo not found on the Pi. Install rustup (recommended) or rustc >= 1.85." >&2
+  exit 1
+}
+
 export CGO_ENABLED=1
-export CGO_LDFLAGS='-Wl,--no-as-needed -lstdc++ -Wl,--as-needed'
-go build -ldflags "-X main.version=${VERSION} -s -w" -o capi-server ./capi
-echo "\$PASS" | sudo -S systemctl stop capi.service 2>/dev/null || true
-echo "\$PASS" | sudo -S cp capi-server /opt/capi/capi
-echo "\$PASS" | sudo -S chmod +x /opt/capi/capi
-echo "\$PASS" | sudo -S cp capi.service /etc/systemd/system/capi.service
-echo "\$PASS" | sudo -S systemctl daemon-reload
-echo "\$PASS" | sudo -S systemctl restart capi.service
-sleep 2
-systemctl is-active capi.service
-curl -sS -o /dev/null -w "health HTTP %{http_code}\n" http://127.0.0.1:8080/api/health || true
+export CAPI_VERSION='${VERSION}'
+cargo build --release --locked
+
+INSTALL_DIR=/opt/capi
+BINARY=\$INSTALL_DIR/capi
+NEW=\$INSTALL_DIR/capi.new
+BAK=\$INSTALL_DIR/capi.bak
+
+sudo mkdir -p "\$INSTALL_DIR"
+install -m 0755 target/release/capi "\$NEW"
+
+# Backup + atomic swap, mirroring install.sh.
+if [ -e "\$BINARY" ]; then
+  sudo cp -a "\$BINARY" "\$BAK"
+  HAD_PREVIOUS=1
+else
+  HAD_PREVIOUS=0
+fi
+
+sudo systemctl stop capi.service 2>/dev/null || true
+sudo install -o capi -g capi -m 0755 "\$NEW" "\$BINARY"
+rm -f "\$NEW"
+sudo systemctl restart capi.service
+
+# Health gate: 10 x 1s against /api/health; roll back on failure.
+health_ok=0
+for _ in \$(seq 1 10); do
+  if curl -fsS -o /dev/null --connect-timeout 2 --max-time 3 http://127.0.0.1:8080/api/health 2>/dev/null; then
+    health_ok=1
+    break
+  fi
+  sleep 1
+done
+
+if [ "\$health_ok" != "1" ]; then
+  echo "ERROR: new binary did not become healthy; rolling back." >&2
+  journalctl -u capi.service -n 50 --no-pager || true
+  if [ "\$HAD_PREVIOUS" = "1" ]; then
+    sudo mv -f "\$BAK" "\$BINARY"
+    sudo systemctl restart capi.service
+    echo "==> Previous binary restored and service restarted."
+  else
+    sudo systemctl stop capi.service || true
+    echo "==> No previous binary; service stopped." >&2
+  fi
+  exit 1
+fi
+
+# Unit hygiene: never clobber a customized unit; warn on drift instead.
+if ! cmp -s capi.service /etc/systemd/system/capi.service 2>/dev/null; then
+  echo "WARN: installed /etc/systemd/system/capi.service differs from the repo copy."
+  echo "      Run install.sh on the Pi to refresh it (it preserves systemctl edit overrides)."
+fi
+
+echo "\$BINARY" -version 2>/dev/null || true
+curl -fsS -o /dev/null -w "==> /api/health HTTP %{http_code}\n" http://127.0.0.1:8080/api/health
 EOF
 
 echo "==> Done. Open http://${SSH_IP}:8080"

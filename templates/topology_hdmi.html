@@ -1,0 +1,23 @@
+<section class="card">
+  <header class="card-head">
+    <h2>HDMI topology</h2>
+    <span class="pill pill-dim"><span class="dot"></span>{{ ctx.known_port_count }} port{% if ctx.known_port_count != 1 %}s{% endif %}</span>
+  </header>
+  {% if !ctx.own_addresses.is_empty() %}
+  <p class="dim small topo-own">Adapter logical address{% if ctx.own_addresses.len() > 1 %}es{% endif %}:
+    {%- for a in ctx.own_addresses %} <span class="mono">{{ a }}</span>{% endfor %}
+  </p>
+  {% endif %}
+  <ul class="topo-list">
+    {% for p in ctx.ports %}
+    <li class="topo-row">
+      <span class="topo-port mono">HDMI {{ p.port }}</span>
+      <span class="topo-devices">
+        {% for name in p.devices %}<span class="chip">{{ name }}</span>{% endfor %}
+        {% if p.devices.is_empty() %}<span class="dim">&mdash;</span>{% endif %}
+      </span>
+    </li>
+    {% endfor %}
+    {% if ctx.ports.is_empty() %}<li class="dim small">No port information yet &mdash; run a scan.</li>{% endif %}
+  </ul>
+</section>

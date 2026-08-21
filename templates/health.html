@@ -1,0 +1,14 @@
+<section class="card">
+  <header class="card-head">
+    <h2>Service health</h2>
+    {% if ctx.cec_ready %}<span class="pill pill-ok"><span class="dot"></span>OK</span>{% else %}<span class="pill pill-err"><span class="dot"></span>Adapter offline</span>{% endif %}
+  </header>
+  <dl class="fact-list">
+    <div><dt>Version</dt><dd class="mono">{{ ctx.version }}</dd></div>
+    <div><dt>Uptime</dt><dd>{{ ctx.uptime }}</dd></div>
+    <div><dt>libCEC</dt><dd>{{ ctx.lib_info }}</dd></div>
+    <div><dt>Event subscribers</dt><dd>{{ ctx.subscribers }}</dd></div>
+    <div><dt>Events dropped</dt><dd{% if ctx.events_dropped > 0 %} class="text-err"{% endif %}>{{ ctx.events_dropped }}</dd></div>
+    <div><dt>Frames captured</dt><dd>{{ ctx.frames_captured }}</dd></div>
+  </dl>
+</section>

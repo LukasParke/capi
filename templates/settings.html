@@ -1,0 +1,95 @@
+{% extends "shell.html" %}
+{% block title %}Settings{% endblock title %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Settings</h1>
+    <p class="page-sub">Session, MQTT, updates and security.</p>
+  </div>
+</div>
+
+<div class="settings-grid">
+  <section class="card" aria-labelledby="session-heading">
+    <header class="card-head">
+      <h2 id="session-heading">Session</h2>
+      <span class="pill{% if monitor_only %} pill-warn{% else %} pill-ok{% endif %}" data-mode-pill><span class="dot"></span>{% if monitor_only %}Monitor-only{% else %}Passive{% endif %}</span>
+    </header>
+    <p class="dim small">Passive mode observes the bus and answers polls. Monitor-only listens without transmitting &mdash; safe for troubleshooting. Changing the mode reopens the adapter.</p>
+    <div class="segmented" role="radiogroup" aria-label="Session mode" data-mode-group>
+      <label class="segment">
+        <input type="radio" name="monitor_only" value="0" data-mode-radio{% if !monitor_only %} checked{% endif %}>
+        <span>Passive</span>
+      </label>
+      <label class="segment">
+        <input type="radio" name="monitor_only" value="1" data-mode-radio{% if monitor_only %} checked{% endif %}>
+        <span>Monitor-only</span>
+      </label>
+    </div>
+    <div class="form-actions">
+      <button class="btn" type="button"
+              hx-post="/ui/dev/action/mode" hx-vals='{"mode":"reconnect"}' hx-swap="none">Reconnect adapter</button>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="mqtt-heading">
+    <header class="card-head">
+      <h2 id="mqtt-heading">MQTT</h2>
+      <span class="conn-pill{% if mqtt.connected %} is-ok{% else %} is-err{% endif %}"><span class="dot"></span>{% if mqtt.connected %}Connected{% else %}Disconnected{% endif %}</span>
+    </header>
+    <form class="form-grid" data-mqtt-form data-pass-set="{{ mqtt.pass_set }}">
+      <label class="field">
+        <span>Broker</span>
+        <input class="input" type="text" name="broker" value="{{ mqtt.broker }}" placeholder="tcp://localhost:1883" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="field">
+        <span>Username</span>
+        <input class="input" type="text" name="user" value="{{ mqtt.user }}" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <input class="input" type="password" name="pass" placeholder="{% if mqtt.pass_set %}&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;{% else %}not set{% endif %}" autocomplete="new-password">
+      </label>
+      <label class="field">
+        <span>Topic prefix</span>
+        <input class="input" type="text" name="prefix" value="{{ mqtt.prefix }}" autocomplete="off" spellcheck="false">
+      </label>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit"
+                hx-post="/ui/action/mqtt_save" hx-include="closest form" hx-swap="none">Save</button>
+        <p class="dim small">Leave the password empty to keep the current one. Saving reconnects the client.</p>
+      </div>
+    </form>
+  </section>
+
+  <section class="card" aria-labelledby="update-heading">
+    <header class="card-head">
+      <h2 id="update-heading">Update</h2>
+      <span class="pill pill-dim"><span class="dot"></span><span class="mono">{{ version }}</span></span>
+    </header>
+    <p class="dim small">Checks GitHub for a newer release, installs it and restarts the service. The service is unavailable for a few seconds while restarting.</p>
+    <div class="form-actions">
+      <button class="btn btn-primary" type="button"
+              data-confirm="Check for updates and install now? The service will restart."
+              data-endpoint="/api/update" data-method="POST">Check &amp; install</button>
+    </div>
+    <p class="dim small" data-update-note hidden></p>
+  </section>
+
+  <section class="card" aria-labelledby="security-heading">
+    <header class="card-head">
+      <h2 id="security-heading">Security</h2>
+      {% if token_set %}<span class="pill pill-ok"><span class="dot"></span>Token active</span>{% else %}<span class="pill pill-warn"><span class="dot"></span>No token set</span>{% endif %}
+    </header>
+    {% if token_set %}
+    <p class="dim small">An access token is configured. Every API call and UI action requires the session cookie issued at sign-in. The token itself is never displayed here.</p>
+    {% else %}
+    <p class="dim small">No access token is configured &mdash; the API is open on your LAN. Set <code>auth_token</code> in <code>config.json</code> to require sign-in. The token is never displayed here.</p>
+    {% endif %}
+    <ul class="sec-list dim small">
+      <li>UI actions are same-origin only</li>
+      <li><code>/login</code> sets an HttpOnly session cookie</li>
+      <li>Leave <code>auth_token</code> empty only on fully trusted networks</li>
+    </ul>
+  </section>
+</div>
+{% endblock content %}

@@ -1,0 +1,97 @@
+<section class="card">
+  <header class="card-head">
+    <h2>Remote</h2>
+    <label class="target-label">
+      <span>Target</span>
+      <select class="select select-small" data-nav-target aria-label="Remote target device">
+        {% for t in ctx.nav_targets %}
+        <option value="{{ t.la }}"{% if t.selected %} selected{% endif %}>{{ t.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </header>
+  <div class="remote-body" data-nav-group>
+    <div class="dpad" role="group" aria-label="Direction pad">
+      <button type="button" class="btn key-btn dpad-up" data-key="nav_up" aria-label="Up"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"nav_up"}' hx-swap="none">
+        <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M5 12.5 10 7.5l5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <button type="button" class="btn key-btn dpad-left" data-key="nav_left" aria-label="Left"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"nav_left"}' hx-swap="none">
+        <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M12.5 5 7.5 10l5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <button type="button" class="btn key-btn dpad-center" data-key="select" aria-label="Select"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"select"}' hx-swap="none">OK</button>
+      <button type="button" class="btn key-btn dpad-right" data-key="nav_right" aria-label="Right"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"nav_right"}' hx-swap="none">
+        <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="m7.5 5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <button type="button" class="btn key-btn dpad-down" data-key="nav_down" aria-label="Down"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"nav_down"}' hx-swap="none">
+        <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="m5 7.5 5 5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+    <div class="key-row" role="group" aria-label="System keys">
+      <button type="button" class="btn key-btn key-wide" data-key="back"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"back"}' hx-swap="none">Back</button>
+      <button type="button" class="btn key-btn key-wide" data-key="home"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"home"}' hx-swap="none">Home</button>
+      <button type="button" class="btn key-btn key-wide" data-key="menu"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"menu"}' hx-swap="none">Menu</button>
+    </div>
+    <div class="key-row transport" role="group" aria-label="Transport keys">
+      <button type="button" class="btn key-btn btn-icon" data-key="rewind" aria-label="Rewind"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"rewind"}' hx-swap="none">
+        <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M11 5.5v9L4.5 10Z M16.5 5.5v9L10 10Z" fill="currentColor"/></svg>
+      </button>
+      <button type="button" class="btn key-btn btn-icon" data-key="play" aria-label="Play"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"play"}' hx-swap="none">
+        <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M6.5 4.5 15 10l-8.5 5.5Z" fill="currentColor"/></svg>
+      </button>
+      <button type="button" class="btn key-btn btn-icon" data-key="pause" aria-label="Pause"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"pause"}' hx-swap="none">
+        <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M6.5 4.5v11M13.5 4.5v11" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+      </button>
+      <button type="button" class="btn key-btn btn-icon" data-key="stop" aria-label="Stop"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"stop"}' hx-swap="none">
+        <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><rect x="5" y="5" width="10" height="10" rx="1.5" fill="currentColor"/></svg>
+      </button>
+      <button type="button" class="btn key-btn btn-icon" data-key="fast_forward" aria-label="Fast forward"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"fast_forward"}' hx-swap="none">
+        <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M3.5 5.5v9L10 10Z M10 5.5v9L16.5 10Z" fill="currentColor"/></svg>
+      </button>
+      <button type="button" class="btn key-btn btn-icon" data-key="record" aria-label="Record"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"record"}' hx-swap="none">
+        <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><circle cx="10" cy="10" r="5" fill="currentColor"/></svg>
+      </button>
+    </div>
+    <div class="key-row" role="group" aria-label="Channel keys">
+      <button type="button" class="btn key-btn key-wide" data-key="channel_up"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"channel_up"}' hx-swap="none">Ch +</button>
+      <button type="button" class="btn key-btn key-wide" data-key="channel_down"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"channel_down"}' hx-swap="none">Ch &minus;</button>
+    </div>
+    <div class="number-pad" role="group" aria-label="Number keys">
+      <button type="button" class="btn key-btn num-btn" data-key="number_1"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"number_1"}' hx-swap="none">1</button>
+      <button type="button" class="btn key-btn num-btn" data-key="number_2"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"number_2"}' hx-swap="none">2</button>
+      <button type="button" class="btn key-btn num-btn" data-key="number_3"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"number_3"}' hx-swap="none">3</button>
+      <button type="button" class="btn key-btn num-btn" data-key="number_4"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"number_4"}' hx-swap="none">4</button>
+      <button type="button" class="btn key-btn num-btn" data-key="number_5"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"number_5"}' hx-swap="none">5</button>
+      <button type="button" class="btn key-btn num-btn" data-key="number_6"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"number_6"}' hx-swap="none">6</button>
+      <button type="button" class="btn key-btn num-btn" data-key="number_7"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"number_7"}' hx-swap="none">7</button>
+      <button type="button" class="btn key-btn num-btn" data-key="number_8"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"number_8"}' hx-swap="none">8</button>
+      <button type="button" class="btn key-btn num-btn" data-key="number_9"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"number_9"}' hx-swap="none">9</button>
+      <button type="button" class="btn key-btn num-btn" data-key="number_0"
+              hx-post="/ui/action/nav_key" hx-vals='{"key":"number_0"}' hx-swap="none">0</button>
+    </div>
+  </div>
+</section>

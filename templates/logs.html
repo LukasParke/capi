@@ -1,0 +1,10 @@
+<div class="log-view" data-log-view>
+  {% for l in ctx.lines %}
+  <div class="log-line" data-level="{{ l.level }}">
+    <time class="mono log-time">{{ l.timestamp }}</time>
+    <span class="log-level mono">{{ l.level }}</span>
+    <span class="log-msg">{{ l.message }}</span>
+  </div>
+  {% endfor %}
+  {% if ctx.lines.is_empty() %}<p class="dim small log-empty">No log lines yet.</p>{% endif %}
+</div>
