@@ -100,6 +100,6 @@ async fn update_handler_missing_sums_is_502() {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     // On x86_64 hosts the arch guard fires before the sums check; either way
     // the handler must surface a 502 envelope with an explanatory message.
-    assert!(v["message"].as_str().unwrap().len() > 0);
+    assert!(!v["message"].as_str().unwrap().is_empty());
     std::env::remove_var("CAPI_UPDATE_BASE_TEST");
 }

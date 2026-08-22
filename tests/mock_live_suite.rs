@@ -5,7 +5,7 @@
 #![cfg(feature = "mock-cec")]
 
 use capi::cec;
-use capi::cec::{DisplayControl, LogicalAddress};
+use capi::cec::LogicalAddress;
 mod common;
 
 use axum::body::Body;

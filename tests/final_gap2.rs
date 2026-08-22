@@ -6,9 +6,9 @@
 
 mod common;
 
-use capi::cec::{self, Command, LogicalAddress, Opcode};
+use capi::cec::{self, LogicalAddress, Opcode};
 use capi::mqtt;
-use capi::{AdapterHandle, BusState, EventHub};
+use capi::{AdapterHandle, BusState};
 use std::sync::Arc;
 
 use serial_test::serial;

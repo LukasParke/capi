@@ -5,7 +5,7 @@
 
 mod common;
 
-use capi::cec::{self, CecEvent, Command, LogicalAddress, Opcode};
+use capi::cec::{self, Command, LogicalAddress, Opcode};
 use common::*;
 
 use axum::body::Body;
@@ -18,7 +18,7 @@ use tower::ServiceExt;
 #[test]
 fn keycode_display_and_from_name_full_range() {
     for b in 0u8..=255 {
-        let k = capi::cec::Keycode(b);
+        let _k = capi::cec::Keycode(b);
         // Display must not panic for any value (Keycode has no Display;
         // name lookup is the user-facing surface).
         // keycode_from_name covers the reverse direction in mock_suite.
@@ -44,7 +44,6 @@ fn device_type_for_address_covers_full_range() {
 
 #[test]
 fn exec_error_display_all_variants() {
-    use capi::exec::ExecError;
     let cec_err = format!("{}", capi::cec::CecError::Closed);
     assert!(!cec_err.is_empty());
     assert_eq!(
@@ -172,7 +171,7 @@ fn bridges_gate_on_closed_session_id() {
     };
     let conn = Arc::new(cec::Connection::open(&cfg).unwrap());
     conn.force_opened_for_test();
-    let id = conn.session_id();
+    let _id = conn.session_id();
     let mut rx = conn.subscribe_events();
 
     // Close: session deregistered; bridge lookups for this id now fail.

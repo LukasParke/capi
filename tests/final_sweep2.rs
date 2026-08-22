@@ -18,7 +18,7 @@ async fn call(
     body: Option<(String, String)>,
 ) -> (axum::http::StatusCode, String) {
     let mut b = axum::http::Request::builder().method(method).uri(uri);
-    if let Some((d, ct)) = &body {
+    if let Some((_d, ct)) = &body {
         b = b.header("Content-Type", ct.as_str());
     }
     let data = body.map(|(d, _)| d).unwrap_or_default();

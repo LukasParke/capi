@@ -5,11 +5,9 @@
 
 mod common;
 
-use capi::cec::{self, CecEvent, LogicalAddress};
-use capi::events::EventHub;
+use capi::cec::{self, LogicalAddress};
 use common::*;
 use serial_test::serial;
-use std::sync::Arc;
 
 // -- steward queue saturation ---------------------------------------------------
 
@@ -140,6 +138,7 @@ fn cec_post_close_and_lag_behaviour() {
 }
 
 // Helper so the emit signature matches (params slice arg).
+#[allow(non_snake_case)]
 fn Command_for_lag() -> cec::Command {
     cec::Command {
         initiator: LogicalAddress(0),

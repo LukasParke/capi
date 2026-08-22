@@ -7,7 +7,7 @@
 mod common;
 
 use axum::body::Body;
-use capi::cec::{self, CecEvent, Command, LogicalAddress, Opcode};
+use capi::cec::{self, LogicalAddress};
 use common::*;
 use serial_test::serial;
 use sha2::{Digest, Sha256};

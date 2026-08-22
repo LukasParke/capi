@@ -7,7 +7,7 @@
 mod common;
 
 use axum::body::Body;
-use capi::cec::{self, LogicalAddress, Opcode};
+use capi::cec::{self, LogicalAddress};
 use common::*;
 use serial_test::serial;
 use std::sync::Arc;
@@ -20,7 +20,7 @@ async fn call(
     json: Option<String>,
 ) -> (axum::http::StatusCode, String) {
     let mut b = axum::http::Request::builder().method(method).uri(uri);
-    if let Some(_) = json {
+    if json.is_some() {
         b = b.header("Content-Type", "application/json");
     }
     let data = json.unwrap_or_default();

@@ -7,11 +7,9 @@ use axum::body::Body;
 use capi::cec;
 use capi::cec::LogicalAddress;
 use capi::events::EventHub;
-use capi::settings::Settings;
 use capi::steward::Steward;
 use capi::{AdapterHandle, BusState};
 mod common;
-use common::*;
 use serial_test::serial;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -107,8 +105,7 @@ fn volume_forced_target_invalid_is_err() {
 
 #[test]
 fn classify_feature_abort_no_params_falls_through() {
-    use capi::cec::Opcode;
-    use capi::strategies::{classify_for_test as classify, StratResult, StratStatus};
+    use capi::strategies::{StratResult, StratStatus};
     use capi::types::BusFrameEntry;
     let mut res = StratResult {
         strategy: "t".into(),
