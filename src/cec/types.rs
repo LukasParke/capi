@@ -1077,3 +1077,46 @@ mod table_sweeps {
         assert_eq!(CECVersion::V1_4.to_string(), "1.4");
     }
 }
+
+#[cfg(test)]
+mod display_sweeps {
+    use super::*;
+
+    #[test]
+    fn device_type_display_covers_all_variants() {
+        for b in 0u8..=255 {
+            let s = DeviceType(b).to_string();
+            assert!(!s.is_empty(), "{b}");
+        }
+        assert_eq!(DeviceType::TV.to_string(), "TV");
+        assert_eq!(DeviceType::RECORDING.to_string(), "Recording Device");
+        assert_eq!(DeviceType::PLAYBACK.to_string(), "Playback Device");
+    }
+
+    #[test]
+    fn power_status_display_covers_all_variants() {
+        for b in [0x00u8, 0x01, 0x02, 0x03, 0x7F, 0xFF] {
+            assert!(!PowerStatus(b).to_string().is_empty(), "{b:#x}");
+        }
+        assert_eq!(PowerStatus::ON.to_string(), "On");
+        assert_eq!(PowerStatus::STANDBY.to_string(), "Standby");
+    }
+
+    #[test]
+    fn cec_version_display_covers_known() {
+        for b in [0x00u8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06] {
+            assert!(!CECVersion(b).to_string().is_empty(), "{b}");
+        }
+    }
+
+    #[test]
+    fn expected_device_type_maps_all_roles() {
+        assert_eq!(expected_device_type(0), DeviceType::TV);
+        assert_eq!(expected_device_type(1), DeviceType::RECORDING);
+        assert_eq!(expected_device_type(3), DeviceType::TUNER);
+        assert_eq!(expected_device_type(4), DeviceType::PLAYBACK);
+        assert_eq!(expected_device_type(5), DeviceType::AUDIO_SYSTEM);
+        assert_eq!(expected_device_type(12), DeviceType::RESERVED);
+        assert_eq!(expected_device_type(255), DeviceType::RESERVED);
+    }
+}

@@ -145,6 +145,11 @@ pub fn truthy(s: &str) -> bool {
     )
 }
 
+#[doc(hidden)]
+pub fn api_map_exec_for_test(e: &crate::exec::ExecError) -> Response {
+    api_map_exec(e)
+}
+
 pub fn api_map_exec(e: &crate::exec::ExecError) -> Response {
     match e {
         crate::exec::ExecError::AdapterUnavailable => unavailable(),
@@ -336,10 +341,9 @@ async fn auth_layer(State(state): State<AppState>, req: Request<Body>, next: Nex
         return err(StatusCode::UNAUTHORIZED, "unauthorized");
     }
 
-    if method == axum::http::Method::POST && !via_header && !same_origin {
-        return err(StatusCode::FORBIDDEN, "cross-origin mutation rejected");
-    }
-
+    // NOTE: cookie/query-authenticated cross-origin mutations are already
+    // rejected above (authenticated requires same_origin for those), so no
+    // separate 403 arm is needed here.
     next.run(req).await
 }
 

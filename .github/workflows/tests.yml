@@ -51,11 +51,11 @@ jobs:
 
       # Ratchet gate: pinned to the current measured baseline (88%). Raise
       # this number as coverage improves; never let it drop.
-      - name: Coverage ratchet (>=88% lines)
+      - name: Coverage ratchet (>=91% lines (ratcheted; target 95%))
         env:
           LLVM_COV: /usr/bin/llvm-cov
           LLVM_PROFDATA: /usr/bin/llvm-profdata
         run: |
           set -euo pipefail
           cargo llvm-cov --locked --summary-only --features mock-cec \
-            --fail-under-lines 88 -- --test-threads=1
+            --fail-under-lines 91 -- --test-threads=1

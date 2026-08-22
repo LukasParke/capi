@@ -8,7 +8,6 @@
  *
  * Never linked into release builds.
  */
-#define _GNU_SOURCE
 #include <libcec/cecc.h>
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #pragma GCC diagnostic ignored "-Wmisleading-indentation"
@@ -431,4 +430,66 @@ void mock_emit_source_activated(uintptr_t id, uint8_t addr, int activated) {
 int mock_emit_menu_on(uintptr_t id, int state) {
     if (!g_bridges.menu) return 0;
     return g_bridges.menu(id, state);
+}
+
+void mock_emit_log(uintptr_t id, int level, const char *msg) {
+    if (!g_bridges.log) return;
+    g_bridges.log(id, level, 42, msg);
+}
+
+/* Detached variants: invoke bridges with a NULL cb_param so the pre-session
+ * and post-close silent-gate arms in the Rust bridges are exercised. */
+void mock_emit_log_detached(int level, const char *msg) {
+    if (!g_bridges.log) return;
+    g_bridges.log(0, level, 0, msg);
+}
+void mock_emit_keypress_detached(uint8_t key, uint32_t duration) {
+    if (!g_bridges.key) return;
+    g_bridges.key(0, (int)key, duration);
+}
+void mock_emit_alert_detached(int alert, int ptype, int64_t pvalue) {
+    if (!g_bridges.alert) return;
+    g_bridges.alert(0, alert, ptype, pvalue);
+}
+void mock_emit_source_activated_detached(uint8_t addr, int activated) {
+    if (!g_bridges.source) return;
+    g_bridges.source(0, addr, activated);
+}
+void mock_emit_config_changed_detached(void) {
+    libcec_configuration cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    if (!g_bridges.config_changed) return;
+    g_bridges.config_changed(0, &cfg);
+}
+void mock_emit_menu_detached(int state) {
+    if (!g_bridges.menu) return;
+    g_bridges.menu(0, state);
+}
+void mock_emit_command_detached(uint8_t init, uint8_t dest, uint8_t opcode) {
+    cec_command cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.initiator = (cec_logical_address)init;
+    cmd.destination = (cec_logical_address)dest;
+    cmd.opcode = (cec_opcode)opcode;
+    cmd.opcode_set = 1;
+    cmd.eom = 1;
+    if (!g_bridges.command) return;
+    g_bridges.command(0, &cmd);
+}
+
+void mock_emit_command_by_id(uintptr_t id, uint8_t init, uint8_t dest, uint8_t opcode) {
+    cec_command cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.initiator = (cec_logical_address)init;
+    cmd.destination = (cec_logical_address)dest;
+    cmd.opcode = (cec_opcode)opcode;
+    cmd.opcode_set = 1;
+    cmd.eom = 1;
+    if (!g_bridges.command) return;
+    g_bridges.command(id, &cmd);
+}
+
+void mock_emit_log_null(void) {
+    if (!g_bridges.log) return;
+    g_bridges.log(0, 2, 0, NULL);
 }

@@ -1400,6 +1400,16 @@ pub mod mock {
         fn mock_emit_source_activated(id: usize, addr: u8, activated: i32);
         fn mock_emit_menu_on(id: usize, state: i32) -> i32;
         fn mock_last_was_reply() -> i32;
+        fn mock_emit_log(id: usize, level: i32, msg: *const std::ffi::c_char);
+        fn mock_emit_log_detached(level: i32, msg: *const std::ffi::c_char);
+        fn mock_emit_keypress_detached(key: u8, duration: u32);
+        fn mock_emit_alert_detached(alert: i32, ptype: i32, pvalue: i64);
+        fn mock_emit_source_activated_detached(addr: u8, activated: i32);
+        fn mock_emit_config_changed_detached();
+        fn mock_emit_menu_detached(state: i32);
+        fn mock_emit_command_detached(init: u8, dest: u8, opcode: u8);
+        fn mock_emit_log_null();
+        fn mock_emit_command_by_id(id: usize, init: u8, dest: u8, opcode: u8);
         fn mock_set_fail_next(n: i32);
         fn mock_last_transmit(
             initiator: *mut u8,
@@ -1444,6 +1454,11 @@ pub mod mock {
         unsafe { mock_emit_config_changed() }
     }
 
+    pub fn emit_log_on(conn: &Connection, level: i32, msg: &str) {
+        let c = std::ffi::CString::new(msg).unwrap();
+        unsafe { mock_emit_log(conn.session_id() as usize, level, c.as_ptr()) }
+    }
+
     pub fn last_was_reply() -> bool {
         unsafe { mock_last_was_reply() == 1 }
     }
@@ -1459,6 +1474,36 @@ pub mod mock {
 
     pub fn emit_menu_on(conn: &Connection, state: i32) -> i32 {
         unsafe { mock_emit_menu_on(conn.session_id() as usize, state) }
+    }
+
+    pub fn emit_log_detached(level: i32, msg: &str) {
+        let c = std::ffi::CString::new(msg).unwrap();
+        unsafe { mock_emit_log_detached(level, c.as_ptr()) }
+    }
+    pub fn emit_keypress_detached(key: u8, duration: u32) {
+        unsafe { mock_emit_keypress_detached(key, duration) }
+    }
+    pub fn emit_alert_detached(alert: i32, ptype: i32, pvalue: i64) {
+        unsafe { mock_emit_alert_detached(alert, ptype, pvalue) }
+    }
+    pub fn emit_source_activated_detached(addr: u8, activated: bool) {
+        unsafe { mock_emit_source_activated_detached(addr, activated as i32) }
+    }
+    pub fn emit_config_changed_detached() {
+        unsafe { mock_emit_config_changed_detached() }
+    }
+    pub fn emit_menu_detached(state: i32) {
+        unsafe { mock_emit_menu_detached(state) }
+    }
+    pub fn emit_command_by_id(conn: &Connection, init: u8, dest: u8, opcode: u8) {
+        unsafe { mock_emit_command_by_id(conn.session_id() as usize, init, dest, opcode) }
+    }
+
+    pub fn emit_command_detached(init: u8, dest: u8, opcode: u8) {
+        unsafe { mock_emit_command_detached(init, dest, opcode) }
+    }
+    pub fn emit_log_null() {
+        unsafe { mock_emit_log_null() }
     }
 
     pub struct LastTransmit {

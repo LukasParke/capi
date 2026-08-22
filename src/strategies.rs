@@ -475,6 +475,11 @@ fn execute_step(
     }
 }
 
+#[doc(hidden)]
+pub fn expected_reply_opcode_for_test(s: &Step) -> Option<Opcode> {
+    expected_reply_opcode(s)
+}
+
 fn expected_reply_opcode(s: &Step) -> Option<Opcode> {
     match s.kind {
         StepKind::SendUserControl => match s.key {
@@ -498,6 +503,16 @@ fn expected_reply_opcode(s: &Step) -> Option<Opcode> {
         },
         _ => None,
     }
+}
+
+#[doc(hidden)]
+pub fn classify_for_test(
+    res: &mut StratResult,
+    new_frames: &[crate::types::BusFrameEntry],
+    expected: Option<Opcode>,
+    own_la: i32,
+) {
+    classify(res, new_frames, expected, own_la)
 }
 
 fn classify(

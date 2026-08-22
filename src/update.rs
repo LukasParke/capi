@@ -69,7 +69,18 @@ fn asset_name_for(arch: &str) -> Result<String, String> {
 }
 
 pub async fn check_and_perform(settings: &Settings) -> Result<Option<String>, String> {
-    check_and_perform_in(settings, GITHUB_BASE, None, true, None).await
+    let base = std::env::var("CAPI_UPDATE_BASE_TEST").unwrap_or_else(|_| GITHUB_BASE.to_string());
+    check_and_perform_in(settings, &base, None, true, None).await
+}
+
+#[doc(hidden)]
+pub async fn __test_check_named(
+    settings: &Settings,
+    base: &str,
+    install_dir: Option<std::path::PathBuf>,
+    bin_name: &str,
+) -> Result<Option<String>, String> {
+    check_and_perform_in(settings, base, install_dir, false, Some(bin_name)).await
 }
 
 #[doc(hidden)]

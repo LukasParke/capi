@@ -4,7 +4,7 @@
 
 mod common;
 
-use capi::cec::{self, Configuration, LogicalAddress};
+use capi::cec::{self, CecEvent, Command, Configuration, LogicalAddress, Opcode};
 use serial_test::serial;
 use std::sync::Arc;
 
@@ -298,4 +298,63 @@ fn run_stops_at_first_ok_unless_all_requested() {
     assert!(capi::cec::mock::last_was_reply(), "auto-reply emitted");
 
     conn.close().unwrap();
+}
+
+#[test]
+#[serial]
+fn bridge_arms_log_and_closed_gates() {
+    cec::mock::reset();
+    let cfg = capi::cec::Configuration {
+        device_name: "gates".into(),
+        device_type: capi::cec::DeviceType::RECORDING,
+        physical_address: 0xFFFF,
+        base_device: LogicalAddress::TV,
+        hdmi_port: 1,
+        monitor_only: false,
+        activate_source: false,
+        wake_devices: vec![],
+        power_off_devices: vec![],
+    };
+    let conn = Arc::new(capi::cec::Connection::open(&cfg).unwrap());
+    conn.force_opened_for_test();
+    let mut rx = conn.subscribe_events();
+
+    // Log bridge arm.
+    capi::cec::mock::emit_log_on(&conn, 2, "bridge log line");
+    match rx.blocking_recv().unwrap() {
+        CecEvent::Log { message, .. } => assert_eq!(message, "bridge log line"),
+        other => panic!("{other:?}"),
+    }
+
+    // Menu handler set: emit_menu returns handler verdict (1).
+    conn.set_menu_state_handler(Some(Arc::new(|_| true)));
+    assert_eq!(capi::cec::mock::emit_menu_on(&conn, 1), 1);
+
+    conn.close().unwrap();
+
+    // After close: every bridge gate returns silently; channel reports Closed.
+    let mut rx2 = conn.subscribe_events();
+    capi::cec::mock::emit_log_on(&conn, 2, "post-close");
+    capi::cec::mock::emit_keypress_on(&conn, 5, 10);
+    capi::cec::mock::emit_alert_on(&conn, 1, 0, 0);
+    capi::cec::mock::emit_source_activated_on(&conn, 3, true);
+    capi::cec::mock::emit_config_changed_on(&conn);
+    capi::cec::mock::emit_menu_on(&conn, 0);
+    cec::mock::emit_command_on(
+        &conn,
+        &Command {
+            initiator: LogicalAddress(0),
+            destination: LogicalAddress(4),
+            opcode: Opcode(0x44),
+            opcode_set: true,
+            parameters: vec![],
+            ack: false,
+            eom: true,
+        },
+    );
+    assert!(matches!(
+        rx2.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+            | Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
 }

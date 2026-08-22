@@ -5,6 +5,7 @@
 #![cfg(feature = "mock-cec")]
 
 use capi::cec;
+use capi::cec::{DisplayControl, LogicalAddress};
 mod common;
 
 use axum::body::Body;
@@ -191,4 +192,94 @@ fn cec_stats_and_menu_and_injections() {
     assert_eq!(capi::cec::mock::emit_menu_on(&conn, 1), 1);
 
     conn.close().unwrap();
+}
+
+#[tokio::test]
+#[serial]
+async fn dev_mode_and_probe_filter_arms() {
+    cec::mock::reset();
+    let state = app_state_with_live_session();
+    let app = capi::server::build_router(state);
+
+    // Mode GET.
+    let resp = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/dev/mode")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Probe with each single kind (mock acks; replies may or may not come).
+    for kind in ["power", "vendor", "osd", "cec_version", "physical"] {
+        let (status, _) = post_json(
+            app.clone(),
+            "/api/dev/probe",
+            &format!(r#"{{"address":0,"kind":"{kind}","observe_ms":40}}"#),
+        )
+        .await;
+        assert_eq!(status, 200, "{kind}");
+    }
+
+    // Send key repeat path.
+    let (status, _) = post_json(
+        app.clone(),
+        "/api/dev/send_key",
+        r#"{"address":0,"key":"volume_up","repeat":2,"hold_ms":10}"#,
+    )
+    .await;
+    assert_eq!(status, 200);
+}
+
+#[tokio::test]
+#[serial]
+async fn connection_full_success_surface() {
+    cec::mock::reset();
+    let state = app_state_with_live_session();
+    let conn = state.adapter().get().unwrap();
+
+    // These succeed against the mock (all acked).
+    assert!(conn.audio_mute().is_ok());
+    assert!(conn.audio_unmute().is_ok());
+    assert!(conn.set_inactive_view().is_ok());
+    assert!(conn
+        .set_active_source(capi::cec::DeviceType::RECORDING)
+        .is_ok());
+    assert!(conn
+        .set_osd_string(
+            LogicalAddress::TV,
+            capi::cec::DisplayControl::DEFAULT_TIME,
+            "test"
+        )
+        .is_ok());
+    assert!(conn
+        .set_configuration(&capi::cec::Configuration {
+            device_name: "resuccess".into(),
+            ..capi::cec::Configuration {
+                device_name: String::new(),
+                device_type: capi::cec::DeviceType::RECORDING,
+                physical_address: 0xFFFF,
+                base_device: LogicalAddress::TV,
+                hdmi_port: 1,
+                monitor_only: false,
+                activate_source: false,
+                wake_devices: vec![],
+                power_off_devices: vec![],
+            }
+        })
+        .is_ok());
+    assert!(conn.server_version().unwrap_or(0) > 0);
+    assert!(conn.open_adapter("/dev/mock0").is_ok());
+
+    // get_device_info aggregation.
+    let info = conn.get_device_info(capi::cec::LogicalAddress(0)).unwrap();
+    let m = info.to_map();
+    assert_eq!(m["osd_name"], "MOCKBOX");
+
+    // event_subscribers.
+    let _ = conn.event_subscribers();
 }
