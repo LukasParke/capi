@@ -141,11 +141,19 @@ pub fn run_supervisor(
             })
             .expect("spawn cec-events");
 
-        match deps
-            .adapter
-            .wait_for(&SHUTDOWN_FLAG, Duration::from_secs(u64::MAX / 2))
-        {
-            WaitReason::Timeout => continue,
+        // Poll in 1s slices: SHUTDOWN_FLAG has no condvar, so a long
+        // blocking wait would ignore shutdown until timeout.
+        let reason = loop {
+            match deps
+                .adapter
+                .wait_for(&SHUTDOWN_FLAG, Duration::from_secs(1))
+            {
+                WaitReason::Timeout => continue,
+                r => break r,
+            }
+        };
+        match reason {
+            WaitReason::Timeout => unreachable!("slice loop breaks on state"),
             reason => {
                 publish_state(&deps.hub, "disconnected");
                 deps.adapter.set(None);
@@ -199,4 +207,36 @@ fn clamp_addrs(v: &[i32]) -> Vec<u8> {
         .filter(|x| **x >= 0 && **x <= 14)
         .map(|x| *x as u8)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_doubles_and_caps_at_60s() {
+        let mut b = MIN_BACKOFF;
+        assert_eq!(b, Duration::from_secs(3));
+        b = next_backoff(b);
+        assert_eq!(b, Duration::from_secs(6));
+        for _ in 0..10 {
+            b = next_backoff(b);
+        }
+        assert_eq!(b, MAX_BACKOFF);
+    }
+
+    #[test]
+    fn clamp_addrs_drops_out_of_range() {
+        assert_eq!(clamp_addrs(&[0, 5, 14]), vec![0, 5, 14]);
+        assert_eq!(clamp_addrs(&[-1, 15, 99]), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn sleep_std_respects_shutdown_flag() {
+        SHUTDOWN_FLAG.store(false, Ordering::SeqCst);
+        assert!(sleep_std(Duration::from_millis(10)));
+        SHUTDOWN_FLAG.store(true, Ordering::SeqCst);
+        assert!(!sleep_std(Duration::from_millis(10)));
+        SHUTDOWN_FLAG.store(false, Ordering::SeqCst);
+    }
 }

@@ -1,6 +1,13 @@
 fn main() {
-    // CEC C shim (compiled when present; CecFfi appended the link block below).
-    let shim = "src/cec/shim.c";
+    // CEC C backend: real shim by default, deterministic mock under
+    // `--features mock-cec` so integration tests can drive success paths
+    // without HDMI hardware.
+    let shim = if std::env::var("CARGO_FEATURE_MOCK_CEC").is_ok() {
+        println!("cargo:rustc-cfg=mock_cec");
+        "src/cec/shim_mock.c"
+    } else {
+        "src/cec/shim.c"
+    };
     if std::path::Path::new(shim).exists() {
         let mut b = cc::Build::new();
         b.file(shim).include("/usr/include").flag("-std=c11");

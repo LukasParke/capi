@@ -10,9 +10,11 @@ pub mod ws;
 use crate::adapter::AdapterHandle;
 use crate::busstate::BusState;
 use crate::events::{EventHub, LogRing, Metrics};
+use crate::settings as settings_mod;
 use crate::settings::Settings;
 use crate::steward::Steward;
 use crate::strategies::Registry;
+use crate::supervisor::SupervisorDeps;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{header, HeaderValue, Request, StatusCode};
@@ -75,14 +77,52 @@ impl AppState {
         self.0.mqtt.is_connected()
     }
 
+    /// Accessors used by the MQTT/CEC dispatchers and integration tests.
+    pub fn adapter_ready(&self) -> bool {
+        self.0.adapter.ready()
+    }
+
+    pub fn adapter(&self) -> &AdapterHandle {
+        &self.0.adapter
+    }
+
+    pub fn bus(&self) -> &Arc<BusState> {
+        &self.0.bus
+    }
+
+    pub fn registry(&self) -> &Arc<Registry> {
+        &self.0.registry
+    }
+
+    pub fn steward(&self) -> &Arc<Steward> {
+        &self.0.steward
+    }
+
+    pub fn hub(&self) -> &Arc<EventHub> {
+        &self.0.hub
+    }
+
+    pub fn logs(&self) -> &Arc<LogRing> {
+        &self.0.logs
+    }
+
+    pub fn settings(&self) -> &Arc<Settings> {
+        &self.0.settings
+    }
+
     /// Apply a new MQTT config: start when broker set, stop otherwise.
+    /// Outside the binary entry point (tests) no command consumer exists; a
+    /// throwaway channel keeps publishes harmless no-ops.
     pub fn apply_mqtt_config(&self, cfg: &crate::types::MqttConfig) {
         if cfg.broker.is_empty() {
             self.0.mqtt.stop();
         } else {
-            self.0
-                .mqtt
-                .start(cfg.clone(), self.0.hub.subscribe(), mqtt_cmd_tx());
+            let tx = MQTT_CMD_TX.get().cloned().unwrap_or_else(|| {
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                drop(rx);
+                tx
+            });
+            self.0.mqtt.start(cfg.clone(), self.0.hub.subscribe(), tx);
         }
     }
 }
@@ -110,7 +150,8 @@ pub fn api_map_exec(e: &crate::exec::ExecError) -> Response {
         crate::exec::ExecError::AdapterUnavailable => unavailable(),
         crate::exec::ExecError::InvalidLogicalAddress
         | crate::exec::ExecError::InvalidHdmiPort
-        | crate::exec::ExecError::InvalidKey => err(StatusCode::BAD_REQUEST, e.to_string()),
+        | crate::exec::ExecError::InvalidKey
+        | crate::exec::ExecError::MissingKey => err(StatusCode::BAD_REQUEST, e.to_string()),
         _ => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -414,4 +455,201 @@ pub fn build_router(state: AppState) -> Router {
         .layer(axmw::from_fn_with_state(state.clone(), auth_layer))
         .layer(axmw::from_fn(observability))
         .with_state(state)
+}
+
+/// Full server boot: config load/overlay, shared state, MQTT, supervisor
+/// thread, HTTP listener, graceful shutdown. Returns the process exit code.
+/// `pub` so integration tests drive the real wiring in-process.
+pub async fn run(flags: settings_mod::Flags) -> u8 {
+    // ---- config ------------------------------------------------------------
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("./capi"));
+    let config_path = flags.config_dir.clone().unwrap_or_else(|| {
+        exe.parent()
+            .unwrap()
+            .join("config.json")
+            .to_string_lossy()
+            .to_string()
+    });
+    let (settings, _corrupt) = match Settings::load(std::path::Path::new(&config_path)) {
+        Ok((s, c)) => (Arc::new(s), c),
+        Err(e) => {
+            tracing::error!("{e}");
+            Settings::quarantine_corrupt(std::path::Path::new(&config_path));
+            eprintln!("capi: refusing to start; config quarantined");
+            return 1;
+        }
+    };
+
+    settings.apply_overrides(&settings_mod::CliOverrides {
+        mqtt_broker: (!flags.mqtt_broker.is_empty()).then(|| flags.mqtt_broker.clone()),
+        mqtt_user: (!flags.mqtt_user.is_empty()).then(|| flags.mqtt_user.clone()),
+        mqtt_pass: (!flags.mqtt_pass.is_empty()).then(|| flags.mqtt_pass.clone()),
+        mqtt_prefix_explicit: std::env::args()
+            .any(|a| a == "-mqtt-prefix" || a.starts_with("-mqtt-prefix=")),
+        mqtt_prefix: flags.mqtt_prefix.clone(),
+        token: (!flags.token.is_empty()).then(|| flags.token.clone()),
+    });
+    let bind = flags.bind.clone();
+
+    if settings.get().auth_token.is_empty() {
+        tracing::warn!("no auth token configured — API is open on the LAN. Set auth_token in config.json or pass -token.");
+    }
+    crate::ui::LOGIN_TOKEN
+        .set(settings.get().auth_token.clone())
+        .ok();
+
+    // ---- shared state ------------------------------------------------------
+    let hub = Arc::new(EventHub::new(512));
+    let logs = LogRing::new(500);
+    let bus = Arc::new(BusState::new());
+    let metrics = Arc::new(Metrics::default());
+    let adapter = AdapterHandle::new();
+    let registry = Arc::new(Registry::new());
+
+    crate::dispatch::apply_persisted_strategy_overrides(&settings, &registry);
+
+    let steward = Arc::new(Steward::spawn(
+        bus.clone(),
+        hub.clone(),
+        settings.clone(),
+        adapter.clone(),
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    ));
+
+    // ---- MQTT --------------------------------------------------------------
+    let mqtt = crate::mqtt::MqttHandle::new();
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<crate::mqtt::MqttCommand>();
+    let _ = MQTT_CMD_TX.set(cmd_tx.clone());
+    mqtt.start(settings.get().mqtt, hub.subscribe(), cmd_tx);
+
+    let state = AppState::new(
+        settings.clone(),
+        hub.clone(),
+        logs.clone(),
+        bus.clone(),
+        adapter.clone(),
+        steward.clone(),
+        registry.clone(),
+        metrics.clone(),
+        mqtt.clone(),
+    );
+    {
+        let st = state.clone();
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                let st = st.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::dispatch::dispatch_mqtt_command(&st, &cmd)
+                });
+            }
+        });
+    }
+
+    // ---- supervisor thread --------------------------------------------------
+    {
+        let deps = SupervisorDeps {
+            settings: settings.clone(),
+            adapter: adapter.clone(),
+            bus: bus.clone(),
+            hub: hub.clone(),
+        };
+        let logs2 = logs.clone();
+        let steward2 = steward.clone();
+        let name = flags.name.clone();
+        let adapter_path = flags.adapter.clone();
+        let monitor = flags.cec_monitor;
+        std::thread::Builder::new()
+            .name("supervisor".into())
+            .spawn(move || {
+                crate::supervisor::run_supervisor(deps, name, adapter_path, monitor, {
+                    let bus = bus.clone();
+                    let hub = hub.clone();
+                    Arc::new(move |conn, ev| {
+                        crate::dispatch::dispatch_cec_event(conn, &bus, &hub, &steward2, &logs2, ev)
+                    })
+                })
+            })
+            .expect("spawn supervisor");
+    }
+
+    // ---- HTTP server --------------------------------------------------------
+    let app = build_router(state.clone());
+    let listener = match tokio::net::TcpListener::bind(&bind).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("capi: cannot bind {bind}: {e}");
+            return 1;
+        }
+    };
+    tracing::info!("capi {} listening on http://{bind}", crate::ui::VERSION);
+
+    {
+        let st = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let cfg = st.0.settings.get().mqtt;
+                if !cfg.broker.is_empty() && !st.mqtt_connected() {
+                    st.apply_mqtt_config(&cfg);
+                }
+            }
+        });
+    }
+
+    let adapter_for_shutdown = adapter.clone();
+    // Test hook: auto-shutdown shortly after binding.
+    if let Some(ms) = flags.shutdown_after_ms {
+        let hook_adapter = adapter.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            crate::supervisor::SHUTDOWN_FLAG.store(true, std::sync::atomic::Ordering::SeqCst);
+            hook_adapter.signal_reconnect();
+        });
+    }
+
+    let shutdown = async move {
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
+        #[cfg(unix)]
+        let term = async {
+            use tokio::signal::unix::{signal, SignalKind};
+            match signal(SignalKind::terminate()) {
+                Ok(mut s) => {
+                    s.recv().await;
+                }
+                Err(_) => std::future::pending::<()>().await,
+            }
+        };
+        #[cfg(not(unix))]
+        let term = std::future::pending::<()>();
+        // Test/programmatic shutdown: poll the global flag.
+        let flag_watch = async {
+            loop {
+                if crate::supervisor::SHUTDOWN_FLAG.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        };
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = term => {},
+            _ = flag_watch => {},
+        }
+        tracing::info!("shutting down");
+        crate::supervisor::SHUTDOWN_FLAG.store(true, std::sync::atomic::Ordering::SeqCst);
+        adapter_for_shutdown.signal_reconnect();
+    };
+
+    if let Err(e) = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
+    {
+        tracing::error!("server: {e}");
+        return 1;
+    }
+    mqtt.stop();
+    0
 }

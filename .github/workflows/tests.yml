@@ -1,0 +1,61 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6 # v6.1.0
+
+      - name: Install Rust toolchain (sha256-verified)
+        env:
+          RUST_TOOLCHAIN: '1.97.1'
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o /tmp/rustup-init \
+            "https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init"
+          curl -fsSL --retry 3 -o /tmp/rustup-init.sha256 \
+            "https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256"
+          echo "$(awk '{print $1}' /tmp/rustup-init.sha256)  /tmp/rustup-init" | sha256sum -c -
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --no-modify-path --profile minimal \
+            --component llvm-tools-preview --default-toolchain "$RUST_TOOLCHAIN"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install libcec + cargo-llvm-cov
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libcec-dev libp8-platform-dev libudev-dev llvm
+          cargo install cargo-llvm-cov --locked
+
+      # Unit + integration + e2e suites. The e2e suite spawns the real binary;
+      # the MQTT loopback test is #[ignore]-gated (no broker on runners).
+      - name: Test
+        env:
+          CARGO_TERM_COLOR: always
+        run: cargo test --locked -- --test-threads=1
+
+      # Ratchet gate: pinned to the current measured baseline (88%). Raise
+      # this number as coverage improves; never let it drop.
+      - name: Coverage ratchet (>=88% lines)
+        env:
+          LLVM_COV: /usr/bin/llvm-cov
+          LLVM_PROFDATA: /usr/bin/llvm-profdata
+        run: |
+          set -euo pipefail
+          cargo llvm-cov --locked --summary-only --features mock-cec \
+            --fail-under-lines 88 -- --test-threads=1

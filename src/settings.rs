@@ -135,6 +135,7 @@ impl Settings {
 #[derive(Default)]
 pub struct Flags {
     pub bind: String,
+    pub config_dir: Option<String>,
     pub name: String,
     pub adapter: String,
     pub mqtt_broker: String,
@@ -142,6 +143,8 @@ pub struct Flags {
     pub mqtt_pass: String,
     pub mqtt_prefix: String,
     pub cec_monitor: bool,
+    /// Test hook: auto-shutdown N ms after the listener binds.
+    pub shutdown_after_ms: Option<u64>,
     pub token: String,
     pub show_version: bool,
     pub do_update: bool,
@@ -151,6 +154,7 @@ pub fn parse_flags(args: &[String]) -> Result<Flags, String> {
     let mut f = Flags {
         bind: ":8080".into(),
         name: "CEC HTTP Bridge".into(),
+        config_dir: None,
         mqtt_prefix: "capi".into(),
         ..Default::default()
     };
@@ -202,4 +206,112 @@ pub fn init_tracing() {
         .with_target(false)
         .init();
     info!("");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn tmp_path(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("capi-cfg-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d.join("config.json")
+    }
+
+    #[test]
+    fn missing_file_yields_defaults() {
+        let (s, note) = Settings::load(&tmp_path("missing")).unwrap();
+        assert!(note.is_none());
+        assert_eq!(s.get().mqtt.prefix, "capi");
+    }
+
+    #[test]
+    fn corrupt_config_is_an_error_not_silent_defaults() {
+        // Regression: the Go loader swallowed parse errors and reset to
+        // defaults, then overwrote the user's file on next save.
+        let p = tmp_path("corrupt");
+        std::fs::write(&p, "{ not json").unwrap();
+        assert!(Settings::load(&p).is_err());
+    }
+
+    #[test]
+    fn quarantine_moves_file_aside() {
+        let p = tmp_path("quar");
+        std::fs::write(&p, "garbage").unwrap();
+        Settings::quarantine_corrupt(&p);
+        assert!(!p.exists());
+        assert!(p.with_extension("json.corrupt").exists());
+    }
+
+    #[test]
+    fn update_persists_and_is_atomic() {
+        let p = tmp_path("atomic");
+        let (s, _) = Settings::load(&p).unwrap();
+        s.update(|c| c.auth_token = "tok".into()).unwrap();
+        let on_disk = std::fs::read_to_string(&p).unwrap();
+        assert!(on_disk.contains("\"tok\""));
+        // No temp file left behind.
+        assert!(!p.with_extension("json.tmp").exists());
+        let (s2, _) = Settings::load(&p).unwrap();
+        assert_eq!(s2.get().auth_token, "tok");
+    }
+
+    #[test]
+    fn update_failure_leaves_memory_untouched() {
+        let p = tmp_path("ro");
+        let (s, _) = Settings::load(&p).unwrap();
+        // Point persistence at an impossible directory.
+        let bad = Settings {
+            path: PathBuf::from("/proc/nonexistent/config.json"),
+            current: std::sync::RwLock::new(s.get()),
+        };
+        assert!(bad.update(|c| c.auth_token = "x".into()).is_err());
+        assert_eq!(bad.get().auth_token, ""); // memory never diverged
+    }
+
+    #[test]
+    fn apply_overrides_semantics() {
+        let p = tmp_path("ovr");
+        let (s, _) = Settings::load(&p).unwrap();
+        s.apply_overrides(&CliOverrides {
+            mqtt_broker: Some("tcp://b:1".into()),
+            mqtt_user: None,
+            mqtt_pass: None,
+            mqtt_prefix_explicit: false,
+            mqtt_prefix: "capi".into(),
+            token: Some("t".into()),
+        });
+        let cfg = s.get();
+        assert_eq!(cfg.mqtt.broker, "tcp://b:1");
+        assert_eq!(cfg.mqtt.prefix, "capi"); // default kept when not explicit
+        assert_eq!(cfg.auth_token, "t");
+        // Empty CLI values keep file values.
+        s.apply_overrides(&CliOverrides {
+            mqtt_broker: None,
+            mqtt_user: None,
+            mqtt_pass: None,
+            mqtt_prefix_explicit: false,
+            mqtt_prefix: String::new(),
+            token: None,
+        });
+        assert_eq!(s.get().mqtt.broker, "tcp://b:1");
+    }
+
+    #[test]
+    fn flag_parsing_styles() {
+        let f = parse_flags(&[
+            "-bind".into(),
+            ":9".into(),
+            "-token=xyz".into(),
+            "-cec-monitor".into(),
+        ])
+        .unwrap();
+        assert_eq!(f.bind, ":9");
+        assert_eq!(f.token, "xyz");
+        assert!(f.cec_monitor);
+        assert!(parse_flags(&["-nope".into()]).is_err());
+        assert!(parse_flags(&["-bind".into()]).is_err()); // missing value
+    }
 }

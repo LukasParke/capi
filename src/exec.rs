@@ -17,6 +17,8 @@ pub enum ExecError {
     InvalidLogicalAddress,
     InvalidHdmiPort,
     InvalidKey,
+    /// Neither key nor keycode supplied (keycode 0 = select by spec).
+    MissingKey,
     Cec(crate::cec::CecError),
     Other(String),
 }
@@ -28,6 +30,10 @@ impl std::fmt::Display for ExecError {
             ExecError::InvalidLogicalAddress => write!(f, "invalid logical address"),
             ExecError::InvalidHdmiPort => write!(f, "invalid HDMI port"),
             ExecError::InvalidKey => write!(f, "invalid key"),
+            ExecError::MissingKey => write!(
+                f,
+                "either 'key' or 'keycode' must be provided (keycode 0 = select; use key:\"select\")"
+            ),
             ExecError::Cec(e) => write!(f, "{e:#}"),
             ExecError::Other(s) => write!(f, "{s}"),
         }
@@ -241,6 +247,27 @@ pub fn switch_to_device(c: &Connection, address: LogicalAddress) -> Result<(), C
     })
 }
 
+/// Validate key arguments without touching the adapter, so HTTP handlers
+/// can return precise 400s even when the bus is down.
+pub fn validate_key_args(addr: i32, key_name: &str, keycode: i32) -> Result<(), ExecError> {
+    if !(0..=14).contains(&addr) {
+        return Err(ExecError::InvalidLogicalAddress);
+    }
+    if !key_name.is_empty() {
+        if key_to_action(key_name).is_some() || cec::keycode_from_name(key_name).is_some() {
+            return Ok(());
+        }
+        return Err(ExecError::InvalidKey);
+    }
+    if keycode != 0 {
+        if !(0..=255).contains(&keycode) {
+            return Err(ExecError::InvalidKey);
+        }
+        return Ok(());
+    }
+    Err(ExecError::MissingKey)
+}
+
 /// Send a key by canonical name or raw keycode. keycode 0 is rejected —
 /// it means Select and must be sent as key:"select" (documented parity).
 pub fn send_key(
@@ -251,9 +278,7 @@ pub fn send_key(
     key_name: &str,
     keycode: i32,
 ) -> Result<String, ExecError> {
-    if !(0..=14).contains(&addr) {
-        return Err(ExecError::InvalidLogicalAddress);
-    }
+    validate_key_args(addr, key_name, keycode)?;
     let conn = adapter.get().ok_or(ExecError::AdapterUnavailable)?;
 
     // Route keys that map to registry actions through it (vendor overrides).

@@ -55,6 +55,12 @@ pub struct BusState {
     pub frames_captured: AtomicU64,
 }
 
+impl Default for BusState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BusState {
     pub fn new() -> Self {
         Self {
@@ -344,5 +350,151 @@ impl BusState {
             .filter(|(s, _)| *s > after)
             .map(|(_, e)| e.clone())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cec::{Command, LogicalAddress, Opcode};
+
+    fn state() -> BusState {
+        let s = BusState::new();
+        s.set_frame_ring_capacity(4);
+        s
+    }
+
+    fn cmd(op: Opcode) -> Command {
+        Command {
+            initiator: LogicalAddress(4),
+            destination: LogicalAddress(0),
+            opcode: op,
+            opcode_set: true,
+            parameters: vec![1, 2],
+            ack: true,
+            eom: true,
+        }
+    }
+
+    #[test]
+    fn snapshot_roundtrip_and_defaults() {
+        let s = state();
+        let snap = s.copy_snapshot();
+        assert!(!snap.cec_ready);
+        assert_eq!(snap.active_source, -1);
+        assert!(snap.stale); // never scanned
+
+        s.set_cec_ready(true);
+        s.set_scan_in_progress(true);
+        s.replace_snapshot(
+            vec![serde_json::json!({"logical_address": 4})],
+            vec![4],
+            4,
+            true,
+            false,
+            Some(chrono::Utc::now()),
+            180,
+            256,
+        );
+        let snap = s.copy_snapshot();
+        assert!(snap.cec_ready);
+        assert!(!snap.scan_in_progress); // replace clears the flag
+        assert!(!snap.stale);
+        assert_eq!(snap.devices[0]["logical_address"], 4);
+    }
+
+    #[test]
+    fn frame_ring_trims_to_cap_and_diff_by_seq_survives_wrap() {
+        // Regression: the Go diffFrames compared index positions and silently
+        // lost replies once the ring wrapped. Sequence numbers must not.
+        let s = state();
+        for _ in 0..10 {
+            s.append_frame(&cmd(Opcode::ACTIVE_SOURCE), 4); // ring holds 4
+        }
+        assert_eq!(s.recent_frames().len(), 4);
+
+        let pre = s.ring_high_water();
+        s.append_frame(&cmd(Opcode::REPORT_POWER_STATUS), 4);
+        let new = s.frames_after(pre);
+        assert_eq!(new.len(), 1, "exactly the post-snapshot frame");
+        assert_eq!(new[0].opcode, "0x90");
+    }
+
+    #[test]
+    fn ring_disabled_drops_everything() {
+        let s = state();
+        s.set_frame_ring_capacity(0);
+        s.append_frame(&cmd(Opcode::STANDBY), 0);
+        assert!(s.recent_frames().is_empty());
+        assert_eq!(s.ring_high_water(), 0);
+    }
+
+    #[test]
+    fn observed_fields_merge_into_devices() {
+        let s = state();
+        s.note_seen(9);
+        s.record_observed(9, "vendor_id", serde_json::json!("0x809819"));
+        let mut devices = vec![serde_json::json!({"logical_address": 9})];
+        s.merge_observed_into_devices(&mut devices);
+        assert_eq!(devices[0]["observed_vendor_id"], "0x809819");
+        assert!(devices[0]["observed_at"].is_string());
+        // first/last seen timestamps annotated
+        let (first, last) = s.seen_timestamps();
+        assert!(first.contains_key(&9) && last.contains_key(&9));
+    }
+
+    #[test]
+    fn prune_drops_stale_but_keeps_fresh() {
+        let s = state();
+        s.note_seen(5);
+        // TTL zero disables pruning.
+        s.prune_stale_observed(Duration::ZERO);
+        assert!(s.observed_addresses().contains(&5));
+        // A negative-equivalent tiny TTL prunes (last_seen is now, so use 0s).
+        s.prune_stale_observed(Duration::from_nanos(1));
+        std::thread::sleep(Duration::from_millis(5));
+        s.prune_stale_observed(Duration::from_millis(2));
+        assert!(!s.observed_addresses().contains(&5));
+    }
+
+    #[test]
+    fn apply_observed_command_extracts_fields() {
+        let s = state();
+        s.apply_observed_command(&Command {
+            initiator: LogicalAddress(4),
+            destination: LogicalAddress(15),
+            opcode: Opcode::DEVICE_VENDOR_ID,
+            opcode_set: true,
+            parameters: vec![0x00, 0x80, 0x19],
+            ack: false,
+            eom: true,
+        });
+        s.apply_observed_command(&Command {
+            initiator: LogicalAddress(4),
+            destination: LogicalAddress(15),
+            opcode: Opcode::REPORT_POWER_STATUS,
+            opcode_set: true,
+            parameters: vec![0x00],
+            ack: false,
+            eom: true,
+        });
+        s.apply_observed_command(&Command {
+            initiator: LogicalAddress(4),
+            destination: LogicalAddress(15),
+            opcode: Opcode::FEATURE_ABORT,
+            opcode_set: true,
+            parameters: vec![0x44, 0x01],
+            ack: false,
+            eom: true,
+        });
+        let snap = s.copy_snapshot();
+        // observed fields live in the store, not the snapshot devices
+        s.merge_observed_into_devices(&mut []);
+        let _ = snap;
+        let mut d = vec![serde_json::json!({"logical_address": 4})];
+        s.merge_observed_into_devices(&mut d);
+        assert_eq!(d[0]["observed_vendor_id"], "0x008019");
+        assert_eq!(d[0]["observed_power_status"], "on");
+        assert_eq!(d[0]["observed_last_feature_abort_opcode"], 0x44);
     }
 }

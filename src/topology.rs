@@ -20,17 +20,22 @@ pub struct TopologyPayload {
 
 /// Physical address encoding: 4 nibbles a.b.c.d; the display sits at 0.0.0.0
 /// and its ports are d=1..15, so port = low nibble for direct children.
-fn port_of(phys: &str) -> Option<i64> {
+pub fn port_of(phys: &str) -> Option<i64> {
+    // CEC physical address a.b.c.d: the TV input for any downstream device is
+    // the leftmost nonzero nibble among a..c (d is only meaningful for the
+    // device's own inputs).
     let parts: Vec<&str> = phys.split('.').collect();
     if parts.len() != 4 {
         return None;
     }
-    let nibbles = [parts[0], parts[1], parts[2], parts[3]];
-    if nibbles[0] == "0" && nibbles[1] == "0" && nibbles[2] == "0" {
-        return nibbles[3].parse().ok();
+    for nib in &parts[..3] {
+        if let Ok(v) = nib.parse::<i64>() {
+            if v > 0 {
+                return Some(v);
+            }
+        }
     }
-    // Deeper nodes report their parent's port as the second-lowest nibble.
-    nibbles[2].parse().ok()
+    None
 }
 
 pub fn build_from_snapshot(bus: &BusState) -> TopologyPayload {
@@ -80,5 +85,47 @@ pub fn build_from_snapshot(bus: &BusState) -> TopologyPayload {
         own_addresses,
         known_port_count: known,
         ports: rows,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::busstate::BusState;
+
+    #[test]
+    fn port_of_parses_direct_children_and_deeper_nodes() {
+        assert_eq!(port_of("1.0.0.0"), Some(1));
+        assert_eq!(port_of("5.0.0.0"), Some(5));
+        assert_eq!(port_of("2.1.0.0"), Some(2)); // downstream of TV input 2
+        assert_eq!(port_of("garbage"), None);
+        assert_eq!(port_of("1.0.0"), None);
+    }
+
+    #[test]
+    fn topology_guarantees_minimum_four_ports() {
+        let bus = BusState::new();
+        bus.replace_snapshot(
+            vec![serde_json::json!({
+                "logical_address": 4,
+                "osd_name": "Box",
+                "physical_address": "2.0.0.0",
+                "is_own": false,
+            })],
+            vec![4],
+            -1,
+            true,
+            false,
+            None,
+            180,
+            0,
+        );
+        let topo = build_from_snapshot(&bus);
+        assert!(topo.known_port_count >= 4);
+        assert_eq!(topo.ports.len() as i64, topo.known_port_count);
+        let port2 = topo.ports.iter().find(|p| p.port == 2).unwrap();
+        assert_eq!(port2.devices, vec!["Box".to_string()]);
+        // Own addresses picked up when flagged.
+        assert!(topo.own_addresses.is_empty()); // is_own=false above
     }
 }

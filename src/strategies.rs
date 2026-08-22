@@ -224,6 +224,12 @@ struct RegistryInner {
     per_vendor: HashMap<String, HashMap<Action, Vec<Strategy>>>,
 }
 
+impl Default for Registry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Registry {
     pub fn new() -> Self {
         Self {
@@ -252,7 +258,7 @@ impl Registry {
     pub fn strategies_for(&self, vendor: &str, action: Action) -> Vec<Strategy> {
         let g = self.inner.read().expect("registry lock");
         if !vendor.is_empty() {
-            if let Some(per) = g.per_vendor.get(&vendor.to_lowercase()) {
+            if let Some(per) = g.per_vendor.get(vendor.trim().to_lowercase().as_str()) {
                 if let Some(s) = per.get(&action) {
                     return s.clone();
                 }
@@ -277,6 +283,20 @@ impl Registry {
         opts: &RunOptions,
         deadline: Instant,
     ) -> Vec<StratResult> {
+        // Parity with Go: monitor-only sessions refuse strategy runs.
+        if conn.is_monitor_only() {
+            return vec![StratResult {
+                strategy: "monitor-only".into(),
+                status: StratStatus::Skipped,
+                acked: false,
+                reply_opcode: 0,
+                reply_name: String::new(),
+                abort_opcode: 0,
+                elapsed_ms: 0,
+                error: "connection is monitor-only".into(),
+                steps: vec![],
+            }];
+        }
         let _guard = self.run_lock.lock().expect("run lock");
         let chain = self.strategies_for(&opts.vendor, action);
         if chain.is_empty() {
@@ -792,4 +812,172 @@ fn default_strategies() -> HashMap<Action, Vec<Strategy>> {
         );
     }
     m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn action_parse_is_separator_insensitive() {
+        assert_eq!(Action::parse("volume_up"), Some(Action::VolumeUp));
+        assert_eq!(Action::parse("volume-up"), Some(Action::VolumeUp));
+        assert_eq!(Action::parse("VolumeUp"), None); // canonical form is snake_case
+        assert_eq!(Action::parse(" number_5 "), Some(Action::Number(5)));
+        assert_eq!(Action::parse("nope"), None);
+        assert_eq!(Action::VolumeUp.as_str(), "volume_up");
+    }
+
+    #[test]
+    fn default_chains_cover_every_action() {
+        let r = Registry::new();
+        for (name, action) in ALL_ACTIONS {
+            let chain = r.strategies_for("", *action);
+            assert!(!chain.is_empty(), "{name} has defaults");
+            for s in &chain {
+                assert!(!s.steps.is_empty(), "{} strategy has steps", s.name);
+            }
+        }
+    }
+
+    #[test]
+    fn vendor_overrides_take_precedence_and_clear() {
+        let r = Registry::new();
+        let action = Action::VolumeUp;
+        let custom = vec![Strategy {
+            name: "custom".into(),
+            steps: vec![],
+            observe_ms: 0,
+        }];
+        r.set_vendor_override("0x000048", action, custom.clone());
+        assert_eq!(r.strategies_for("0X000048 ", action)[0].name, "custom");
+        assert_eq!(
+            r.strategies_for("0x0000ff", action)[0].name,
+            "uc_volume_up_audio"
+        );
+        // Empty list clears the override back to defaults.
+        r.set_vendor_override("0x000048", action, vec![]);
+        assert_eq!(
+            r.strategies_for("0x000048", action)[0].name,
+            "uc_volume_up_audio"
+        );
+    }
+
+    #[test]
+    fn clamp_ms_bounds() {
+        assert_eq!(clamp_ms(-5, 100), 0);
+        assert_eq!(clamp_ms(50, 100), 50);
+        assert_eq!(clamp_ms(5000, 100), 100);
+    }
+
+    #[test]
+    fn classify_paths() {
+        use crate::types::BusFrameEntry;
+        let mut res = StratResult {
+            strategy: "t".into(),
+            status: StratStatus::AckedNoReply,
+            acked: true,
+            reply_opcode: 0,
+            reply_name: String::new(),
+            abort_opcode: 0,
+            elapsed_ms: 0,
+            error: String::new(),
+            steps: vec![],
+        };
+        let own = 4;
+        let frame = |op: &str, params: &[&str]| BusFrameEntry {
+            timestamp: chrono::Utc::now(),
+            initiator: 0,
+            destination: 4,
+            opcode: op.into(),
+            ack: true,
+            eom: true,
+            opcode_set: true,
+            params_hex: params.iter().map(|s| s.to_string()).collect(),
+        };
+
+        // Expected reply -> Ok (audio status replies with 0x7A)
+        classify(
+            &mut res,
+            &[frame("0x7A", &[])],
+            Some(Opcode::REPORT_AUDIO_STATUS),
+            own,
+        );
+        assert_eq!(res.status, StratStatus::Ok);
+        assert_eq!(res.reply_name, "REPORT_AUDIO_STATUS");
+
+        // FeatureAbort referencing our opcode -> aborted
+        classify(
+            &mut res,
+            &[frame("0x00", &["44", "01"])],
+            Some(Opcode::REPORT_AUDIO_STATUS),
+            own,
+        );
+        assert_eq!(res.status, StratStatus::FeatureAborted);
+        assert_eq!(res.abort_opcode, 0x44);
+
+        // Own frames are skipped
+        let own_frame = BusFrameEntry {
+            initiator: own,
+            ..frame("0x90", &[])
+        };
+        classify(
+            &mut res,
+            &[own_frame],
+            Some(Opcode::REPORT_AUDIO_STATUS),
+            own,
+        );
+        assert_eq!(res.status, StratStatus::AckedNoReply);
+
+        // No ack observed -> NoAck
+        res.acked = false;
+        classify(&mut res, &[], Some(Opcode::REPORT_AUDIO_STATUS), own);
+        assert_eq!(res.status, StratStatus::NoAck);
+    }
+
+    #[test]
+    fn parse_hex_byte_handles_prefixes_and_garbage() {
+        assert_eq!(parse_hex_byte("0x90"), 0x90);
+        assert_eq!(parse_hex_byte("0XFF"), 0xFF);
+        assert_eq!(parse_hex_byte("90"), 0x90);
+        assert_eq!(parse_hex_byte("zz"), 0);
+    }
+
+    #[test]
+    fn expected_reply_opcode_mapping() {
+        let step = |kind, key, op| Step {
+            kind,
+            target: LogicalAddress::UNKNOWN,
+            key,
+            wait: false,
+            hold_ms: 0,
+            opcode: op,
+            params: vec![],
+            delay_ms: 0,
+        };
+        assert_eq!(
+            expected_reply_opcode(&step(
+                StepKind::SendUserControl,
+                Keycode::VOLUME_UP,
+                Opcode(0)
+            )),
+            Some(Opcode::REPORT_AUDIO_STATUS)
+        );
+        assert_eq!(
+            expected_reply_opcode(&step(StepKind::LibcecPowerOn, Keycode(0), Opcode(0))),
+            Some(Opcode::REPORT_POWER_STATUS)
+        );
+        assert_eq!(
+            expected_reply_opcode(&step(
+                StepKind::Transmit,
+                Keycode(0),
+                Opcode::GIVE_PHYSICAL_ADDRESS
+            )),
+            Some(Opcode::REPORT_PHYSICAL_ADDRESS)
+        );
+        assert_eq!(
+            expected_reply_opcode(&step(StepKind::Wait, Keycode(0), Opcode(0))),
+            None
+        );
+    }
 }

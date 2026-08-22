@@ -14,9 +14,10 @@ use serde_json::json;
 fn map_exec(e: &ExecError) -> Response {
     match e {
         ExecError::AdapterUnavailable => unavailable(),
-        ExecError::InvalidLogicalAddress | ExecError::InvalidHdmiPort | ExecError::InvalidKey => {
-            err(StatusCode::BAD_REQUEST, e.to_string())
-        }
+        ExecError::InvalidLogicalAddress
+        | ExecError::InvalidHdmiPort
+        | ExecError::InvalidKey
+        | ExecError::MissingKey => err(StatusCode::BAD_REQUEST, e.to_string()),
         ExecError::Other(_) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         ExecError::Cec(_) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -324,14 +325,10 @@ pub async fn send_key_handler(
     let Some(axum::Json(req)) = body else {
         return err(StatusCode::BAD_REQUEST, "invalid request body");
     };
-    if !(0..=14).contains(&req.address) {
-        return err(StatusCode::BAD_REQUEST, "invalid logical address");
-    }
-    if req.key.is_empty() && req.keycode == 0 {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "either 'key' or 'keycode' must be provided (keycode 0 = select; use key:\"select\")",
-        );
+    // Full validation (bounds + key-name resolution) before the adapter gate,
+    // so malformed input yields 400 even when the bus is down.
+    if let Err(e) = exec::validate_key_args(req.address, &req.key, req.keycode) {
+        return map_exec(&e);
     }
     let AppState(inner) = state.clone();
     let conn = inner.adapter.get();

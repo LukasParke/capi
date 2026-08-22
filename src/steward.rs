@@ -53,6 +53,23 @@ pub struct Steward {
 }
 
 impl Steward {
+    /// Test/stand-in constructor: no worker threads; enqueue/hint are no-ops.
+    pub fn detached() -> Arc<Steward> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            // Drain and drop: keeps senders happy without executing jobs.
+            while rx.recv().is_ok() {}
+        });
+        let (hint_tx, hint_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || while hint_rx.recv().is_ok() {});
+        Arc::new(Self {
+            tx,
+            hint_tx,
+            queued: Arc::new(AtomicU64::new(0)),
+            dropped: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
     /// Spawn the worker threads.
     pub fn spawn(
         bus: Arc<BusState>,
@@ -232,8 +249,11 @@ fn run_job(
         match c.get_device_info(*addr) {
             Ok(info) => {
                 let mut m = info.to_map();
-                m["polled_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
-                m["discovery"] = serde_json::json!("active");
+                m.insert(
+                    "polled_at".into(),
+                    serde_json::json!(chrono::Utc::now().to_rfc3339()),
+                );
+                m.insert("discovery".into(), serde_json::json!("active"));
                 devices.push(serde_json::Value::Object(m));
             }
             Err(_) => continue,

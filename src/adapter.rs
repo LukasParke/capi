@@ -3,7 +3,7 @@
 //! (supervisor) and async handlers alike.
 
 use crate::cec::Connection;
-use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 
 #[derive(Clone)]
 pub struct AdapterHandle {
@@ -14,6 +14,12 @@ struct AdapterInner {
     current: RwLock<Option<Arc<Connection>>>,
     reconnect_pending: Mutex<bool>,
     reconnect_cv: Condvar,
+}
+
+impl Default for AdapterHandle {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AdapterHandle {
@@ -53,7 +59,9 @@ impl AdapterHandle {
         shutdown: &std::sync::atomic::AtomicBool,
         timeout: std::time::Duration,
     ) -> WaitReason {
-        let deadline = std::time::Instant::now() + timeout;
+        let deadline = std::time::Instant::now()
+            .checked_add(timeout)
+            .unwrap_or(std::time::Instant::now() + std::time::Duration::from_secs(3600));
         let mut p = self.inner.reconnect_pending.lock().expect("reconnect lock");
         loop {
             if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
@@ -75,13 +83,6 @@ impl AdapterHandle {
             p = guard;
         }
     }
-
-    #[allow(dead_code)]
-    pub fn downgrade(&self) -> AdapterWeak {
-        AdapterWeak {
-            inner: Arc::downgrade(&self.inner),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,17 +91,4 @@ pub enum WaitReason {
     Shutdown,
     Reconnect,
     Timeout,
-}
-
-#[derive(Clone)]
-#[allow(dead_code)]
-pub struct AdapterWeak {
-    inner: Weak<AdapterInner>,
-}
-
-#[allow(dead_code)]
-impl AdapterWeak {
-    pub fn upgrade(&self) -> Option<AdapterHandle> {
-        self.inner.upgrade().map(|inner| AdapterHandle { inner })
-    }
 }

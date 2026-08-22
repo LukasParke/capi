@@ -984,3 +984,96 @@ pub fn validate_transmit(cmd: &Command) -> Result<(), CecError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod table_sweeps {
+    use super::*;
+
+    #[test]
+    fn logical_address_names_cover_full_byte_range() {
+        for b in 0u8..=255 {
+            let name = logical_address_name(b);
+            assert!(!name.is_empty(), "{b}");
+        }
+        assert_eq!(logical_address_name(0), "TV");
+        assert_eq!(logical_address_name(14), "Free Use");
+        assert_eq!(logical_address_name(15), "Broadcast");
+    }
+
+    #[test]
+    fn device_type_roles_cover_all_addresses() {
+        for b in 0u8..=15 {
+            assert!(!device_type_for_address(b).is_empty(), "{b}");
+        }
+    }
+
+    #[test]
+    fn power_status_str_covers_common_bytes() {
+        for b in [0x00, 0x01, 0x02, 0x03, 0x99, 0xFF] {
+            assert!(!power_status_str(b).is_empty(), "{b:#x}");
+        }
+    }
+
+    #[test]
+    fn opcode_table_round_trips_through_opcode_name() {
+        let table = crate::cec::opcode_table();
+        assert!(!table.is_empty());
+        for (name, code) in &table {
+            let got = opcode_name(Opcode(*code));
+            assert_eq!(&got, name, "opcode {code:#x}");
+        }
+    }
+
+    #[test]
+    fn keycode_table_round_trips_through_keycode_from_name() {
+        let table = crate::cec::keycode_names();
+        assert!(table.len() >= 50);
+        for (idx, (name, code)) in table.iter().enumerate() {
+            if idx > 0 {
+                let (_, prev_code) = &table[idx - 1];
+                assert!(prev_code <= code, "table sorted by code");
+            }
+            assert_eq!(keycode_from_name(name).unwrap().0, *code, "{name}");
+        }
+        // Canonical names used across HTTP/UI/MQTT.
+        for n in [
+            "select",
+            "up",
+            "down",
+            "left",
+            "right",
+            "exit",
+            "root_menu",
+            "setup_menu",
+            "volume_up",
+            "volume_down",
+            "mute",
+            "play",
+            "pause",
+            "stop",
+            "fast_forward",
+            "rewind",
+            "record",
+            "channel_up",
+            "channel_down",
+            "power",
+            "f1_blue",
+        ] {
+            assert!(keycode_from_name(n).is_some(), "{n}");
+        }
+        assert!(keycode_from_name("not-a-key").is_none());
+    }
+
+    #[test]
+    fn display_impls_match_free_functions() {
+        for b in 0u8..=255 {
+            assert_eq!(LogicalAddress(b).to_string(), logical_address_name(b));
+        }
+        assert_eq!(
+            PowerStatus::ON.to_string().to_lowercase(),
+            power_status_str(0x00).to_lowercase()
+        );
+        assert_eq!(DeviceType::TV.to_string(), "TV");
+        assert_eq!(CECVersion::V1_4.to_string(), "1.4");
+    }
+}

@@ -189,3 +189,27 @@ impl MqttHandle {
         self.connected.store(false, Ordering::Relaxed);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handle_defaults_disconnected() {
+        let h = MqttHandle::new();
+        assert!(!h.is_connected());
+    }
+
+    #[test]
+    fn start_with_empty_broker_is_a_clean_noop() {
+        let h = MqttHandle::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        h.start(
+            crate::types::MqttConfig::default(),
+            tokio::sync::broadcast::channel(8).1,
+            tx,
+        );
+        assert!(!h.is_connected());
+        h.stop(); // idempotent
+    }
+}
